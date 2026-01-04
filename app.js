@@ -420,6 +420,8 @@ function renderQuiz(session){
     }
   }}, [session.idx>0 ? "前へ" : "ホームへ"]);
 
+  form.appendChild(el("div", {class:"row"}, [backBtn, submitBtn]));
+
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     const selected = getSelectedFromForm(form, q.type);
@@ -433,7 +435,6 @@ function renderQuiz(session){
     el("div", {class:"hr"}, []),
     el("div", {class:"p"}, [q.stem]),
     form,
-    el("div", {class:"row"}, [backBtn, submitBtn]),
     resultBox,
   ];
   mount(viewCard("クイズ（練習）", body));

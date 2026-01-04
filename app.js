@@ -1,6 +1,6 @@
 /* 神経解剖学 学習Webアプリ - Vanilla JS / Offline-first */
 
-const APP_VERSION = 1;
+const APP_VERSION = 2;
 const STORAGE_KEY = "neuroStudyProgress_v1";
 const ONGOING_TEST_KEY = "neuroStudyOngoingTest_v1";
 const CUSTOM_DATA_KEY = "neuroStudyCustomData_v1"; // optional override
@@ -55,7 +55,10 @@ function el(tag, attrs={}, children=[]){
   for(const [k,v] of Object.entries(attrs||{})){
     if(k === "class") e.className = v;
     else if(k === "html") e.innerHTML = v;
-    else if(k.startsWith("on") && typeof v === "function") e.addEventListener(k.slice(2), v);
+    else if(k.startsWith("on") && typeof v === "function"){
+      const evtName = k.slice(2).toLowerCase();
+      e.addEventListener(evtName, v);
+    }
     else e.setAttribute(k, v);
   }
   (children||[]).forEach(c => {

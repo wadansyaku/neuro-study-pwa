@@ -106,13 +106,14 @@ function renderHome(){
 
   const btns = el("div", {class:"row"}, [
     el("button", {class:"btn", onClick: () => startPractice({count:10})}, ["クイック練習（10問）"]),
+    el("button", {class:"btn", onClick: () => startPractice({count:10, prioritizeUnlearned:true})}, ["未学習優先（10問）"]),
     el("button", {class:"btn btn--muted", onClick: () => renderTopicSelect()}, ["トピック/タグで練習"]),
     el("button", {class:"btn", onClick: () => startMockTest()}, ["模擬テスト（90分・100問）"]),
     el("button", {class:"btn btn--muted", onClick: () => startWeakReview()}, ["弱点復習（間違い優先）"]),
   ]);
 
   const info = el("div", {class:"small"}, [
-    "※模擬テストは途中で閉じても自動保存して再開できます。"
+    "※未学習優先は、まだ解いていない問題を優先的に10問出題します。模擬テストは途中で閉じても自動保存して再開できます。"
   ]);
 
   mount(viewCard("ホーム", [
@@ -401,14 +402,40 @@ function updateProgressForQuestion(id, correct){
   saveProgress(p);
 }
 
-function startPractice({count=10, tag=null, ids=null}={}){
+function pickPracticeIds({count=10, tag=null, ids=null, prioritizeUnlearned=false}={}){
   let pool = QUESTIONS;
   if(ids && ids.length){
     pool = ids.map(id => INDEX[id]).filter(Boolean);
   }else if(tag){
     pool = QUESTIONS.filter(q => q.tag === tag);
   }
-  const picked = shuffle(pool).slice(0, Math.min(count, pool.length)).map(q => q.id);
+
+  const limit = Math.min(count, pool.length);
+  if(limit <= 0) return [];
+
+  if(prioritizeUnlearned){
+    const progress = loadProgress();
+    const unattempted = [];
+    const attempted = [];
+    pool.forEach(q => {
+      const attempts = progress[q.id]?.attempts || 0;
+      if(attempts === 0) unattempted.push(q);
+      else attempted.push(q);
+    });
+    const ordered = [...shuffle(unattempted), ...shuffle(attempted)];
+    return ordered.slice(0, limit).map(q => q.id);
+  }
+
+  return shuffle(pool).slice(0, limit).map(q => q.id);
+}
+
+function startPractice({count=10, tag=null, ids=null, prioritizeUnlearned=false}={}){
+  const picked = pickPracticeIds({count, tag, ids, prioritizeUnlearned});
+  if(picked.length === 0){
+    alert("出題できる問題が見つかりませんでした。");
+    renderHome();
+    return;
+  }
   const session = {mode:"practice", ids:picked, idx:0, answers:{}, startAt: nowISO()};
   renderQuiz(session);
 }

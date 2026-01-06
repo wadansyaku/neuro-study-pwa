@@ -1,6 +1,7 @@
 /* 神経解剖学 学習Webアプリ - Vanilla JS / Offline-first */
 
 const APP_VERSION = 3;
+const PROGRESS_VERSION = 3;
 const PROGRESS_KEY_V2 = "neuroStudyProgressV2";
 const PROGRESS_KEY_V1 = "neuroStudyProgress_v1";
 const ONGOING_TEST_KEY = "neuroStudyOngoingTest_v1";
@@ -18,6 +19,8 @@ const SR_REASON_OPTIONS = [
 ];
 const SR_SHORT_RETRY_MINUTES = 10;
 const DAILY_REVIEW_LIMIT = 20;
+const REVIEW_SET_SIZES = [10,20,30];
+const PROGRESS_VERSION = 3;
 
 let DATA = null; // {version, source, questions}
 let QUESTIONS = []; // array of question objects
@@ -40,6 +43,15 @@ function htmlEscape(s){
   return (s||"").replace(/[&<>\"']/g, m => ({
     "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
   }[m]));
+}
+function clone(obj){
+  return JSON.parse(JSON.stringify(obj));
+}
+function uniq(arr){
+  return Array.from(new Set(arr));
+}
+function padQuestionNumber(num){
+  return `Q${String(num).padStart(3,"0")}`;
 }
 
 /* -------- Progress model (v2) -------- */
@@ -72,13 +84,22 @@ function defaultCard(){
     wrong: 0,
     lastSeenAt: null,
     lastAnsweredAt: null,
+    lastImportedAt: null,
     sr: defaultSr(),
     mistake: defaultMistake()
   };
 }
 
 function createEmptyProgress(){
-  return {version:2, updatedAt: nowMs(), cards:{}, sessions:{}, mockTest:{}};
+  return {
+    version: PROGRESS_VERSION,
+    updatedAt: nowMs(),
+    cards:{},
+    sessions:{},
+    mockTest:{},
+    attemptHistory: [],
+    lastImportUndo: null
+  };
 }
 
 function normalizeCard(card){
@@ -94,20 +115,24 @@ function normalizeCard(card){
 
 function normalizeProgress(p){
   const base = createEmptyProgress();
+  const incoming = p || {};
   const out = {
     ...base,
-    ...p,
+    ...incoming,
     cards: {}
   };
-  for(const id of Object.keys(p.cards||{})){
-    out.cards[id] = normalizeCard(p.cards[id]);
+  for(const id of Object.keys(incoming.cards||{})){
+    out.cards[id] = normalizeCard(incoming.cards[id]);
   }
+  out.version = PROGRESS_VERSION;
+  if(!Array.isArray(out.attemptHistory)) out.attemptHistory = [];
+  if(out.lastImportUndo && typeof out.lastImportUndo !== "object") out.lastImportUndo = null;
   return out;
 }
 
-function loadProgressV2Raw(){
+function loadProgressStored(){
   const obj = safeJsonParse(localStorage.getItem(PROGRESS_KEY_V2), null);
-  if(obj && obj.version === 2){
+  if(obj && obj.version >= 2){
     return normalizeProgress(obj);
   }
   return null;
@@ -140,7 +165,7 @@ function migrateFromV1(){
 
 function loadProgress(){
   if(PROGRESS_CACHE) return PROGRESS_CACHE;
-  const existing = loadProgressV2Raw();
+  const existing = loadProgressStored();
   if(existing){ PROGRESS_CACHE = existing; return existing; }
   const migrated = migrateFromV1();
   if(migrated){ PROGRESS_CACHE = migrated; return migrated; }
@@ -152,7 +177,6 @@ function loadProgress(){
 
 function saveProgress(p){
   const obj = normalizeProgress(p || {});
-  obj.version = 2;
   obj.updatedAt = nowMs();
   localStorage.setItem(PROGRESS_KEY_V2, JSON.stringify(obj));
   PROGRESS_CACHE = obj;
@@ -206,6 +230,15 @@ function applySpacedRepetition(card, grade){
   card.sr = sr;
   card.lastAnsweredAt = now;
   return sr;
+}
+
+function recordAttemptHistory(p, entry){
+  if(!Array.isArray(p.attemptHistory)) p.attemptHistory = [];
+  p.attemptHistory.push(entry);
+  const MAX_HISTORY = 30;
+  if(p.attemptHistory.length > MAX_HISTORY){
+    p.attemptHistory = p.attemptHistory.slice(-MAX_HISTORY);
+  }
 }
 
 function logMistake(card, reason, note){
@@ -285,6 +318,118 @@ function getTagStats(){
   return byTag;
 }
 
+/* -------- Mock import helpers -------- */
+function parseImportText(raw){
+  const errors = [];
+  if(!raw || !raw.trim()){
+    errors.push("入力が空です。100文字の回答列または番号付き形式で入力してください。");
+    return {errors};
+  }
+  const trimmed = raw.trim();
+  const collapsed = trimmed.replace(/\s/g, "").toUpperCase();
+  const total = QUESTIONS.length;
+  const answers = {};
+
+  function setAnswer(num, val){
+    if(num < 1 || num > total){
+      errors.push(`問題番号 ${num} は範囲外です（1-${total}）。`);
+      return;
+    }
+    const key = padQuestionNumber(num);
+    answers[key] = val === "-" ? null : val;
+  }
+
+  if(/^[A-E\-]+$/.test(collapsed)){
+    if(collapsed.length !== total){
+      errors.push(`文字数が${collapsed.length}文字でした。${total}文字で入力してください。`);
+    }else{
+      collapsed.split("").forEach((ch, idx) => setAnswer(idx+1, ch));
+    }
+    return {answers, errors};
+  }
+
+  const tokens = trimmed.split(/[\n,]+/).map(t => t.trim()).filter(Boolean);
+  tokens.forEach(tok => {
+    const m = tok.match(/^(\d+)\s*[:=]?\s*([A-E\-])$/i);
+    if(!m){
+      errors.push(`形式を解釈できませんでした: 「${tok}」 (例: \"12 A\" または \"12:A\")`);
+      return;
+    }
+    const num = Number(m[1]);
+    const val = m[2].toUpperCase();
+    if(answers[padQuestionNumber(num)] !== undefined){
+      errors.push(`問題番号 ${num} が重複しています。`);
+      return;
+    }
+    setAnswer(num, val);
+  });
+  return {answers, errors};
+}
+
+function gradeAttempt(answerMap){
+  const total = QUESTIONS.length;
+  const wrongIds = [];
+  const unansweredIds = [];
+  const tagMissCounts = {};
+  let correctCount = 0;
+  QUESTIONS.forEach((q, idx) => {
+    const key = q.id;
+    const ans = answerMap[key];
+    if(ans === undefined){
+      unansweredIds.push(idx+1);
+      wrongIds.push(idx+1);
+      return;
+    }
+    const userSel = ans ? [ans] : [];
+    const ok = isCorrect(q, userSel);
+    if(ok){
+      correctCount += 1;
+    }else{
+      wrongIds.push(idx+1);
+      if(ans === null){
+        unansweredIds.push(idx+1);
+      }
+      const tag = q.tag || "その他";
+      tagMissCounts[tag] = (tagMissCounts[tag]||0) + 1;
+    }
+  });
+  return {
+    correct: correctCount,
+    total,
+    wrongIds,
+    unansweredIds,
+    tagMissCounts
+  };
+}
+/* -------- Tag/Concept utilities -------- */
+function ensureQuestionTags(){
+  const keywordMap = [
+    {tag:"視床", keywords:["視床","thalam"]},
+    {tag:"内包", keywords:["内包","internal capsule"]},
+    {tag:"基底核", keywords:["基底核","線条体","被殻","尾状核","globus"]},
+    {tag:"小脳", keywords:["小脳","cerebell"]},
+    {tag:"脳神経", keywords:["脳神経","神経核","動眼","滑車","外転","三叉","顔面","舌咽","迷走","副神経","舌下"]},
+    {tag:"脊髄", keywords:["脊髄","spinal"]},
+    {tag:"自律", keywords:["自律","交感","副交感","内臓"]},
+  ];
+  QUESTIONS.forEach(q => {
+    if(!q.tag){
+      const hay = `${q.stem || ""} ${Object.values(q.options||{}).join(" ")}`.toLowerCase();
+      const hit = keywordMap.find(k => k.keywords.some(w => hay.includes(w.toLowerCase())));
+      if(hit) q.tag = hit.tag;
+      else q.tag = "その他";
+    }
+    if(!Array.isArray(q.concepts)) q.concepts = [];
+  });
+}
+
+function getConceptsForQuestion(q){
+  const tags = [];
+  if(q.tag) tags.push(q.tag);
+  if(Array.isArray(q.concepts)) tags.push(...q.concepts);
+  return uniq(tags.filter(Boolean));
+}
+
 /* -------- DOM helpers -------- */
 function el(tag, attrs={}, children=[]){
   const e = document.createElement(tag);
@@ -353,6 +498,15 @@ function renderHome(){
     ])
   ]);
 
+  const latestMock = getLatestMockAttempt();
+  const mockReviewCard = el("div", {class:"card"}, [
+    el("div", {class:"h2"}, ["復習セット（模試ベース）"]),
+    el("div", {class:"p"}, [latestMock ? `直近の模試インポート: ${latestMock.label || latestMock.importedAt}` : "まだ模試結果がインポートされていません。"]),
+    el("div", {class:"small"}, ["未回答→誤答→関連タグ→SR期限の順で優先して20問（変更可）出題します。"]),
+    el("div", {class:"row"}, REVIEW_SET_SIZES.map(sz => el("button", {class:"btn btn--muted", onClick: () => startMockReview(sz), ...(latestMock?{}:{disabled:"disabled"})}, [`${sz}問で開始`]))),
+    el("button", {class:"btn", onClick: () => renderMockImport()}, ["模擬試験結果をインポートする"])
+  ]);
+
   const btns = el("div", {class:"row"}, [
     el("button", {class:"btn", onClick: () => startPractice({count:10, prioritizeUnlearned:true})}, ["未学習優先（10問）"]),
     el("button", {class:"btn btn--muted", onClick: () => renderTopicSelect()}, ["トピック/タグで練習"]),
@@ -371,6 +525,7 @@ function renderHome(){
     prog,
     el("div", {class:"hr"}, []),
     reviewCard,
+    mockReviewCard,
     btns,
     info
   ]));
@@ -529,13 +684,13 @@ function importProgress(){
     try{
       const obj = JSON.parse(txt);
       let incoming = null;
-      if(obj.version === 2 && obj.cards){
+      if((obj.version === 2 || obj.version === 3) && obj.cards){
         incoming = obj;
-      }else if(obj.progress && obj.progress.version === 2){
+      }else if(obj.progress && (obj.progress.version === 2 || obj.progress.version === 3)){
         incoming = obj.progress;
       }else if(obj && typeof obj === "object"){
         // maybe legacy v1 shape
-        incoming = {version:2, updatedAt: nowMs(), cards:{}};
+        incoming = {version:PROGRESS_VERSION, updatedAt: nowMs(), cards:{}, attemptHistory: [], lastImportUndo: null};
         for(const [id,v] of Object.entries(obj)){
           const card = normalizeCard({
             seen: v.attempts || v.seen || 0,
@@ -549,7 +704,7 @@ function importProgress(){
           incoming.cards[id] = card;
         }
       }
-      if(!incoming || incoming.version !== 2 || typeof incoming.cards !== "object"){
+      if(!incoming || !incoming.cards || typeof incoming.cards !== "object"){
         throw new Error("invalid");
       }
       saveProgress(incoming);
@@ -650,6 +805,132 @@ async function syncToCloud(btn){
       btn.textContent = "クラウドにアップロード";
     }
   }
+}
+
+/* -------- Mock result import -------- */
+function applyImportedAttempt(parsed, graded, rawText, label){
+  const progress = loadProgress();
+  const snapshot = clone(progress);
+  snapshot.lastImportUndo = null;
+  const nowIso = nowISO();
+  const nowMsVal = nowMs();
+
+  QUESTIONS.forEach((q, idx) => {
+    const id = q.id;
+    const ans = parsed.answers[id];
+    const ok = ans !== undefined && ans !== null && isCorrect(q, [ans]);
+    const card = getOrCreateCard(progress, id);
+    incrementStats(card, !!ok);
+    applySpacedRepetition(card, ok ? "good" : "again");
+    card.lastImportedAt = nowMsVal;
+  });
+
+  const compactAnswers = Object.entries(parsed.answers).map(([id, ans]) => ({id, answer: ans}));
+  const attemptEntry = {
+    type: "mockImport",
+    importedAt: nowIso,
+    label: label || `模試インポート ${nowIso}`,
+    correct: graded.correct,
+    total: graded.total,
+    wrongIds: graded.wrongIds,
+    unansweredIds: graded.unansweredIds,
+    tagMissCounts: graded.tagMissCounts,
+    tags: Object.keys(graded.tagMissCounts || {}),
+    relatedTags: Object.keys(graded.tagMissCounts || {}),
+    answers: compactAnswers,
+    rawLength: rawText.length
+  };
+  recordAttemptHistory(progress, attemptEntry);
+  progress.lastImportUndo = {savedAt: nowIso, label: attemptEntry.label, snapshot};
+  saveProgress(progress);
+  return attemptEntry;
+}
+
+function undoLastImport(){
+  const p = loadProgress();
+  if(!p.lastImportUndo || !p.lastImportUndo.snapshot){
+    alert("取り消せるインポートがありません。");
+    return;
+  }
+  const restored = normalizeProgress(p.lastImportUndo.snapshot);
+  restored.lastImportUndo = null;
+  saveProgress(restored);
+  alert("直前のインポートを取り消しました。");
+  renderHome();
+}
+
+function renderMockImport(){
+  const inputSingle = el("textarea", {rows:3, placeholder:"例）ABAAD--EBABC...（100文字）"});
+  const inputLines = el("textarea", {rows:6, placeholder:"例）1 A\\n2 B\\n3 -  または  1:A,2:B,3:-"});
+  const status = el("div", {class:"small"}, []);
+  const resultBox = el("div", {class:"card", style:"display:none"}, []);
+  let parsed = null;
+  let graded = null;
+
+  function handleGrade(){
+    const raw = (inputSingle.value || "").trim() ? inputSingle.value : inputLines.value;
+    const {answers, errors} = parseImportText(raw || "");
+    parsed = null; graded = null;
+    resultBox.style.display = "none";
+    resultBox.innerHTML = "";
+    if(errors.length){
+      status.textContent = errors.join(" / ");
+      return;
+    }
+    const filled = Object.keys(answers).length;
+    if(filled === 0){
+      status.textContent = "有効な回答が見つかりませんでした。";
+      return;
+    }
+    parsed = {answers, raw};
+    graded = gradeAttempt(answers);
+    status.textContent = `採点しました: ${graded.correct}/${graded.total} 点`;
+    resultBox.style.display = "block";
+    const wrongList = graded.wrongIds.length ? graded.wrongIds.join(", ") : "なし";
+    const unansweredList = graded.unansweredIds.length ? graded.unansweredIds.join(", ") : "なし";
+    const tagList = Object.entries(graded.tagMissCounts).map(([tag,cnt]) => `${tag}: ${cnt}件`).join(" / ") || "なし";
+    resultBox.appendChild(el("div", {class:"h2"}, [`得点: ${graded.correct}/${graded.total}`]));
+    resultBox.appendChild(el("div", {class:"p"}, [`誤答: ${wrongList}\n未回答: ${unansweredList}\nタグ別誤答: ${tagList}`]));
+  }
+
+  const applyBtn = el("button", {class:"btn", onClick: () => {
+    if(!parsed || !graded){
+      alert("まず採点してください。");
+      return;
+    }
+    const label = `模試インポート (${nowISO().slice(0,10)})`;
+    applyImportedAttempt(parsed, graded, parsed.raw, label);
+    alert("学習履歴を更新しました。復習セット（模試ベース）から取り出せます。");
+    renderHome();
+  }}, ["この結果を学習履歴に反映"]);
+
+  const undoBtn = el("button", {class:"btn btn--muted", onClick: () => undoLastImport()}, ["直前のインポートを取り消す（Undo）"]);
+  const p = loadProgress();
+  if(!p.lastImportUndo) undoBtn.setAttribute("disabled", "disabled");
+
+  const node = viewCard("模擬試験結果インポート", [
+    el("div", {class:"p"}, ["100文字の回答列または番号付き形式を貼り付けてください。A-Eと-（未回答）が使えます。"]),
+    el("div", {class:"h2"}, ["方法A: 100文字入力（Q1→Q100）"]),
+    inputSingle,
+    el("div", {class:"h2"}, ["方法B: 行形式/カンマ区切り"]),
+    inputLines,
+    el("div", {class:"row"}, [
+      el("button", {class:"btn", onClick: handleGrade}, ["採点する"]),
+      applyBtn,
+      undoBtn
+    ]),
+    status,
+    el("div", {class:"hr"}, []),
+    resultBox,
+    el("div", {class:"hr"}, []),
+    el("button", {class:"btn btn--muted", onClick: () => {
+      inputSingle.value = "";
+      inputLines.value = "";
+      status.textContent = "";
+      resultBox.style.display = "none";
+    }}, ["入力をクリア"])
+  ]);
+  mount(node);
 }
 
 /* -------- Topic / Tag selection -------- */
@@ -755,6 +1036,16 @@ function startDailyReview(){
   renderQuiz(session);
 }
 
+function startMockReview(count=20){
+  const ids = buildMockReviewQueue(count);
+  if(ids.length === 0){
+    alert("直近の模試インポートが見つかりません。先に模試結果をインポートしてください。");
+    return;
+  }
+  const session = {mode:"mockReview", ids, idx:0, answers:{}, startAt: nowISO()};
+  renderQuiz(session);
+}
+
 function buildReviewQueue(limit){
   const progress = loadProgress();
   const now = nowMs();
@@ -791,6 +1082,80 @@ function startWeakReview(){
   startPractice({ids});
 }
 
+function getLatestMockAttempt(){
+  const p = loadProgress();
+  const hist = Array.isArray(p.attemptHistory) ? p.attemptHistory : [];
+  const mockAttempts = hist.filter(h => h.type === "mockImport");
+  return mockAttempts.length ? mockAttempts[mockAttempts.length-1] : null;
+}
+
+function interleaveByTag(ids){
+  const buckets = {};
+  ids.forEach(id => {
+    const q = INDEX[id];
+    const tag = q?.tag || "その他";
+    if(!buckets[tag]) buckets[tag] = [];
+    buckets[tag].push(id);
+  });
+  const tags = Object.keys(buckets);
+  const output = [];
+  while(tags.some(t => buckets[t].length)){
+    tags.forEach(t => {
+      const v = buckets[t].shift();
+      if(v) output.push(v);
+    });
+  }
+  return output;
+}
+
+function buildMockReviewQueue(limit){
+  const latest = getLatestMockAttempt();
+  if(!latest) return [];
+  const progress = loadProgress();
+  const unansweredIds = latest.unansweredIds.map(n => padQuestionNumber(n));
+  const wrongIds = latest.wrongIds.map(n => padQuestionNumber(n)).filter(id => !unansweredIds.includes(id));
+  const targetTags = uniq([...latest.relatedTags || [], ...latest.tags || []]);
+
+  const queue = [];
+  const pushUnique = (id) => {
+    if(id && !queue.includes(id)) queue.push(id);
+  };
+
+  unansweredIds.forEach(pushUnique);
+  wrongIds.forEach(pushUnique);
+
+  if(queue.length < limit){
+    const relatedPool = QUESTIONS.filter(q => {
+      if(queue.includes(q.id)) return false;
+      const concepts = getConceptsForQuestion(q);
+      return concepts.some(c => targetTags.includes(c));
+    });
+    shuffle(relatedPool).forEach(q => {
+      if(queue.length < limit) pushUnique(q.id);
+    });
+  }
+
+  if(queue.length < limit){
+    const now = nowMs();
+    const duePool = QUESTIONS.filter(q => {
+      const card = progress.cards[q.id];
+      return card && card.seen > 0 && (card.sr?.dueAt || 0) <= now;
+    }).filter(q => !queue.includes(q.id));
+    shuffle(duePool).forEach(q => {
+      if(queue.length < limit) pushUnique(q.id);
+    });
+  }
+
+  if(queue.length < limit){
+    const remaining = QUESTIONS.filter(q => !queue.includes(q.id));
+    shuffle(remaining).forEach(q => {
+      if(queue.length < limit) pushUnique(q.id);
+    });
+  }
+
+  return interleaveByTag(queue).slice(0, limit);
+}
+
 function renderQuiz(session){
   const total = session.ids.length;
   const qid = session.ids[session.idx];
@@ -805,7 +1170,7 @@ function renderQuiz(session){
     el("span", {class:"badge"}, [`${session.idx+1}/${total}`]),
     el("span", {class:"badge"}, [q.type_raw]),
     el("span", {class:"badge"}, [q.tag]),
-    el("span", {class:"badge"}, [session.mode === "review" ? "復習" : "練習"]),
+    el("span", {class:"badge"}, [session.mode === "review" ? "復習" : (session.mode === "mockReview" ? "模試復習" : "練習")]),
   ]);
 
   const prog = el("div", {class:"progress"}, [el("div", {style:`width:${progressPct}%`}, [])]);
@@ -924,6 +1289,7 @@ function renderQuiz(session){
     showResult(selected);
   });
 
+  const title = session.mode === "review" ? "クイズ（復習）" : (session.mode === "mockReview" ? "クイズ（模試ベース復習）" : "クイズ（練習）");
   const body = [
     header,
     prog,
@@ -932,7 +1298,7 @@ function renderQuiz(session){
     form,
     resultBox,
   ];
-  mount(viewCard("クイズ（練習）", body));
+  mount(viewCard(title, body));
 }
 
 /* -------- Mock test (90 min, 100 Q) -------- */
@@ -1149,6 +1515,7 @@ async function initData(){
   }
   QUESTIONS = DATA.questions || [];
   INDEX = {};
+  ensureQuestionTags();
   QUESTIONS.forEach(q => { INDEX[q.id] = q; });
 }
 
@@ -1169,6 +1536,7 @@ async function registerSW(){
 document.getElementById("navHome").addEventListener("click", renderHome);
 document.getElementById("navStats").addEventListener("click", renderStats);
 document.getElementById("navData").addEventListener("click", renderData);
+document.getElementById("navImport").addEventListener("click", renderMockImport);
 
 initData().then(() => {
   loadProgress(); // ensure migration

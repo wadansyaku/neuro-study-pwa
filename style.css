@@ -166,6 +166,15 @@ a{color: var(--accent)}
   background: rgba(255,255,255,.06);
   color: var(--text);
 }
+textarea{
+  width:100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border:1px solid var(--border);
+  background: rgba(255,255,255,.06);
+  color: var(--text);
+  font-family: inherit;
+}
 .grade-row{
   display:flex;
   flex-wrap:wrap;

@@ -1,5 +1,5 @@
 // Simple cache-first Service Worker
-const CACHE_NAME = "neuro-study-pwa-v3";
+const CACHE_NAME = "neuro-study-pwa-v4";
 const BASE_URL = self.location;
 const ASSETS = [
   "./",

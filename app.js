@@ -4,6 +4,7 @@ const APP_VERSION = 2;
 const STORAGE_KEY = "neuroStudyProgress_v1";
 const ONGOING_TEST_KEY = "neuroStudyOngoingTest_v1";
 const CUSTOM_DATA_KEY = "neuroStudyCustomData_v1"; // optional override
+const CLOUD_CONFIG_KEY = "neuroStudyCloudConfig_v1"; // optional endpoint/token
 
 let DATA = null; // {version, source, questions}
 let QUESTIONS = []; // array of question objects
@@ -159,6 +160,7 @@ function renderStats(){
 
 function renderData(){
   const st = getStats();
+  const cfg = loadCloudConfig();
   const node = viewCard("データ", [
     el("div", {class:"p"}, [
       "・学習履歴は端末内（localStorage）に保存されます。\n" +
@@ -187,6 +189,27 @@ function renderData(){
           initData().then(renderHome);
         }
       }}, ["同梱データに戻す"])
+    ]),
+    el("div", {class:"hr"}, []),
+    el("div", {class:"h2"}, ["クラウド連携（ChatGPT/Codex向け）"]),
+    el("div", {class:"small"}, [
+      "クラウドの受け口URLを設定すると、学習履歴と統計をJSONでPOST送信できます。ChatGPT/Codexには保存先URL（例: 署名付きURL）を渡してください。"
+    ]),
+    el("div", {class:"row"}, [
+      el("input", {type:"url", placeholder:"https://example.com/upload", value: cfg.url, onChange: (e) => {
+        cfg.url = e.target.value;
+      }}),
+      el("input", {type:"text", placeholder:"Authorizationヘッダー（任意）", value: cfg.token || "", onChange: (e) => {
+        cfg.token = e.target.value;
+      }}),
+      el("button", {class:"btn btn--muted", onClick: () => {
+        saveCloudConfig(cfg);
+        alert("クラウド設定を保存しました。");
+      }}, ["設定を保存"]),
+      el("button", {class:"btn", onClick: (e) => syncToCloud(e.target)}, ["クラウドにアップロード"])
+    ]),
+    el("div", {class:"small"}, [
+      "送信データ: { appVersion, exportedAt, questionsCount, stats, progress }"
     ]),
     el("div", {class:"hr"}, []),
     el("div", {class:"small"}, [`現在の総問題数: ${st.total}`]),
@@ -253,6 +276,64 @@ function pickFile(accept, cb){
     cb(txt);
   };
   input.click();
+}
+
+function loadCloudConfig(){
+  try{
+    const cfg = JSON.parse(localStorage.getItem(CLOUD_CONFIG_KEY) || "{}");
+    return {
+      url: cfg.url || "",
+      token: cfg.token || ""
+    };
+  }catch(e){
+    return {url:"", token:""};
+  }
+}
+
+function saveCloudConfig(cfg){
+  localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify({
+    url: cfg.url || "",
+    token: cfg.token || ""
+  }));
+}
+
+async function syncToCloud(btn){
+  const cfg = loadCloudConfig();
+  if(!cfg.url){
+    alert("クラウドのURLを設定してください。");
+    return;
+  }
+  const payload = {
+    appVersion: APP_VERSION,
+    exportedAt: nowISO(),
+    questionsCount: QUESTIONS.length,
+    stats: getStats(),
+    progress: loadProgress()
+  };
+  if(btn){
+    btn.setAttribute("disabled", "disabled");
+    btn.textContent = "アップロード中…";
+  }
+  try{
+    const res = await fetch(cfg.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(cfg.token ? {Authorization: cfg.token} : {})
+      },
+      body: JSON.stringify(payload)
+    });
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    alert("アップロードしました。ChatGPT/Codexに保存先URLやIDを共有してください。");
+  }catch(e){
+    console.error(e);
+    alert("アップロードに失敗しました: " + e.message);
+  }finally{
+    if(btn){
+      btn.removeAttribute("disabled");
+      btn.textContent = "クラウドにアップロード";
+    }
+  }
 }
 
 /* -------- Topic / Tag selection -------- */

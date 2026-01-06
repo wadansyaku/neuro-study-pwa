@@ -1,7 +1,8 @@
 {
   "name": "神経解剖学 学習Webアプリ",
   "short_name": "神経解剖",
-  "start_url": "./index.html",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#0b1220",
   "theme_color": "#0d6efd",

@@ -1,5 +1,6 @@
 // Simple cache-first Service Worker
-const CACHE_NAME = "neuro-study-pwa-v2";
+const CACHE_NAME = "neuro-study-pwa-v3";
+const BASE_URL = self.location;
 const ASSETS = [
   "./",
   "./index.html",
@@ -9,7 +10,7 @@ const ASSETS = [
   "./data/questions.json",
   "./icons/icon-192.png",
   "./icons/icon-512.png"
-];
+].map((path) => new URL(path, BASE_URL).toString());
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

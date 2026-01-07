@@ -1,5 +1,5 @@
 // Simple cache-first Service Worker
-const CACHE_NAME = "neuro-study-pwa-v4";
+const CACHE_NAME = "neuro-study-pwa-v5";
 const BASE_URL = self.location;
 const ASSETS = [
   "./",
@@ -28,6 +28,11 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;
+  const url = new URL(req.url);
+  if(url.pathname.startsWith("/api/")){
+    event.respondWith(fetch(req));
+    return;
+  }
   event.respondWith(
     caches.match(req).then(cached => {
       if(cached) return cached;

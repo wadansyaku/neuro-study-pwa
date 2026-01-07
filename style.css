@@ -113,6 +113,18 @@ a{color: var(--accent)}
 .option__key{font-weight:800; width: 18px}
 
 .hr{height:1px;background:var(--border);margin:12px 0}
+.status{
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  margin: 8px 0;
+  background: rgba(255,255,255,.04);
+  color: var(--muted);
+}
+.status--ok{color: #9ef2c3; border-color: rgba(62,220,151,.5); background: rgba(62,220,151,.08);}
+.status--warn{color: #ffd088; border-color: rgba(255,208,136,.6); background: rgba(255,208,136,.06);}
+.status--muted{color: var(--muted);}
+.status--info{color: var(--text);}
 
 .footer{
   padding: 14px;
@@ -175,6 +187,16 @@ textarea{
   color: var(--text);
   font-family: inherit;
 }
+input[type="text"],
+input[type="url"],
+input[type="password"]{
+  width:100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border:1px solid var(--border);
+  background: rgba(255,255,255,.06);
+  color: var(--text);
+}
 .grade-row{
   display:flex;
   flex-wrap:wrap;
@@ -187,4 +209,14 @@ textarea{
 }
 .btn--primary{
   box-shadow: 0 0 0 2px rgba(255,255,255,.18);
+}
+.cloud-grid{
+  display:grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+.cloud-grid__item{
+  display:flex;
+  flex-direction:column;
+  gap: 6px;
 }

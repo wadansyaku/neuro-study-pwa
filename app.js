@@ -6,7 +6,8 @@ const PROGRESS_KEY_V2 = "neuroStudyProgressV2";
 const PROGRESS_KEY_V1 = "neuroStudyProgress_v1";
 const ONGOING_TEST_KEY = "neuroStudyOngoingTest_v1";
 const CUSTOM_DATA_KEY = "neuroStudyCustomData_v1"; // optional override
-const CLOUD_CONFIG_KEY = "neuroStudyCloudConfig_v1"; // optional endpoint/token
+const CLOUD_CONFIG_KEY = "neuroStudyCloudConfig_v2"; // cloud sync endpoint/token
+const CLOUD_STATUS_KEY = "neuroStudyCloudStatus_v1"; // last sync metadata
 
 const SR_REASON_OPTIONS = [
   "知識不足",
@@ -20,7 +21,6 @@ const SR_REASON_OPTIONS = [
 const SR_SHORT_RETRY_MINUTES = 10;
 const DAILY_REVIEW_LIMIT = 20;
 const REVIEW_SET_SIZES = [10,20,30];
-const PROGRESS_VERSION = 3;
 
 let DATA = null; // {version, source, questions}
 let QUESTIONS = []; // array of question objects
@@ -44,6 +44,16 @@ function htmlEscape(s){
     "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
   }[m]));
 }
+function formatDateTime(ts){
+  if(!ts) return "未同期";
+  try{
+    const d = new Date(ts);
+    return `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+  }catch(e){
+    return String(ts);
+  }
+}
+function setNodeText(node, text){ if(node) node.textContent = text; }
 function clone(obj){
   return JSON.parse(JSON.stringify(obj));
 }
@@ -598,7 +608,148 @@ function renderStats(){
 
 function renderData(){
   const st = getStats();
-  const cfg = loadCloudConfig();
+  const cfgRef = loadCloudConfig();
+  let cloudMeta = loadCloudStatus();
+  let conflictPayload = null;
+
+  const cloudMessage = el("div", {class:"status status--muted"}, ["クラウド同期は任意設定です。オフラインでも学習できます。"]);
+  const cloudMetaNode = el("div", {class:"small"}, []);
+  const cloudConflictNode = el("div", {class:"small status status--warn"}, []);
+  const normalizeVersion = (v) => {
+    if(v === null || v === undefined) return null;
+    const num = Number(v);
+    return Number.isFinite(num) ? num : null;
+  };
+
+  function updateCloudMetaText(){
+    const parts = [];
+    parts.push(`最終同期: ${formatDateTime(cloudMeta.lastSyncedAt)}`);
+    parts.push(`クラウド version: ${cloudMeta.lastRemoteVersion ?? "未取得"}`);
+    parts.push(`クラウド更新: ${formatDateTime(cloudMeta.lastRemoteUpdatedAt)}`);
+    setNodeText(cloudMetaNode, parts.join(" / "));
+    if(conflictPayload){
+      setNodeText(cloudConflictNode, `⚠️ 別の端末で更新されています (version ${conflictPayload.version ?? "?"}, ${formatDateTime(conflictPayload.updatedAt)}). 強制上書きするか、クラウドから取得してください。`);
+      cloudConflictNode.style.display = "block";
+    }else{
+      setNodeText(cloudConflictNode, "");
+      cloudConflictNode.style.display = "none";
+    }
+  }
+  updateCloudMetaText();
+
+  function setCloudMessage(msg, variant="info"){
+    cloudMessage.className = `status status--${variant}`;
+    setNodeText(cloudMessage, msg);
+  }
+
+  const tokenInput = el("input", {
+    type:"password",
+    placeholder:"同期トークン（Bearerトークン）",
+    value: cfgRef.token,
+    onChange: (e) => { cfgRef.token = e.target.value.trim(); }
+  });
+  const endpointInput = el("input", {
+    type:"url",
+    placeholder:"APIベースURL（任意。同一オリジンなら空でOK）",
+    value: cfgRef.apiBase,
+    onChange: (e) => { cfgRef.apiBase = e.target.value.trim(); }
+  });
+
+  const btnSaveCloud = el("button", {class:"btn btn--muted"}, ["設定を保存"]);
+  const btnPull = el("button", {class:"btn btn--muted"}, ["クラウドから取得"]);
+  const btnPush = el("button", {class:"btn"}, ["クラウドへ送信"]);
+  const btnForce = el("button", {class:"btn btn--danger", disabled:"disabled"}, ["クラウドを強制上書き"]);
+
+  function setBusy(isBusy){
+    [btnSaveCloud, btnPull, btnPush, btnForce].forEach(btn => {
+      if(!btn) return;
+      if(isBusy){
+        btn.setAttribute("disabled", "disabled");
+      }else{
+        if(btn === btnForce && !conflictPayload){
+          btn.setAttribute("disabled", "disabled");
+        }else{
+          btn.removeAttribute("disabled");
+        }
+      }
+    });
+  }
+
+  btnSaveCloud.addEventListener("click", () => {
+    saveCloudConfig(cfgRef);
+    setCloudMessage("クラウド設定を保存しました。", "ok");
+  });
+
+  async function handlePull(){
+    if(!cfgRef.token){
+      setCloudMessage("同期トークンを入力してください。", "warn");
+      return;
+    }
+    setBusy(true);
+    setCloudMessage("クラウドから取得中…", "muted");
+    try{
+      const remote = await fetchCloudState(cfgRef);
+      conflictPayload = null;
+      if(remote.state){
+        saveProgress(remote.state);
+      }
+      cloudMeta = {
+        ...cloudMeta,
+        lastSyncedAt: nowISO(),
+        lastRemoteVersion: normalizeVersion(remote.version),
+        lastRemoteUpdatedAt: remote.updatedAt || null
+      };
+      saveCloudStatus(cloudMeta);
+      updateCloudMetaText();
+      setCloudMessage(remote.state ? "クラウド版を読み込みました。" : "クラウドにデータはまだありません。", "ok");
+      renderHome();
+    }catch(e){
+      setCloudMessage(e.message || "クラウド取得に失敗しました。", "warn");
+    }finally{
+      setBusy(false);
+    }
+  }
+
+  async function handlePush(force=false){
+    if(!cfgRef.token){
+      setCloudMessage("同期トークンを入力してください。", "warn");
+      return;
+    }
+    setBusy(true);
+    setCloudMessage(force ? "クラウドへ強制送信中…" : "クラウドへ送信中…", "muted");
+    try{
+      const result = await pushCloudState(cfgRef, cloudMeta, {force, baseVersion: conflictPayload?.version ?? null});
+      conflictPayload = null;
+      cloudMeta = {
+        ...cloudMeta,
+        lastSyncedAt: nowISO(),
+        lastRemoteVersion: normalizeVersion(result.version) ?? cloudMeta.lastRemoteVersion,
+        lastRemoteUpdatedAt: result.updatedAt || nowISO()
+      };
+      saveCloudStatus(cloudMeta);
+      updateCloudMetaText();
+      setCloudMessage("クラウドへ保存しました。", "ok");
+    }catch(e){
+      if(e instanceof CloudConflictError){
+        conflictPayload = e.payload || null;
+        if(conflictPayload && conflictPayload.version !== undefined){
+          cloudMeta = {...cloudMeta, lastRemoteVersion: normalizeVersion(conflictPayload.version), lastRemoteUpdatedAt: conflictPayload.updatedAt || cloudMeta.lastRemoteUpdatedAt};
+          saveCloudStatus(cloudMeta);
+        }
+        updateCloudMetaText();
+        setCloudMessage("クラウド側が更新されています。取得するか、強制上書きしてください。", "warn");
+      }else{
+        setCloudMessage(e.message || "クラウド送信に失敗しました。", "warn");
+      }
+    }finally{
+      setBusy(false);
+    }
+  }
+
+  btnPull.addEventListener("click", () => handlePull());
+  btnPush.addEventListener("click", () => handlePush(false));
+  btnForce.addEventListener("click", () => handlePush(true));
+
   const node = viewCard("データ", [
     el("div", {class:"p"}, [
       "・学習履歴は端末内（localStorage）に保存されます。\n" +
@@ -629,25 +780,31 @@ function renderData(){
       }}, ["同梱データに戻す"])
     ]),
     el("div", {class:"hr"}, []),
-    el("div", {class:"h2"}, ["クラウド連携（ChatGPT/Codex向け）"]),
+    el("div", {class:"h2"}, ["クラウド同期（単一ユーザー用）"]),
     el("div", {class:"small"}, [
-      "クラウドの受け口URLを設定すると、学習履歴と統計をJSONでPOST送信できます。ChatGPT/Codexには保存先URL（例: 署名付きURL）を渡してください。"
+      "Vercel Functions / Postgres に学習履歴（progress v2）を同期します。トークンで認証し、バージョンで衝突を検出します。"
+    ]),
+    el("div", {class:"cloud-grid"}, [
+      el("div", {class:"cloud-grid__item"}, [
+        el("div", {class:"small"}, ["同期トークン（必須。画面には保存されますがマスク表示）"]),
+        tokenInput,
+      ]),
+      el("div", {class:"cloud-grid__item"}, [
+        el("div", {class:"small"}, ["APIベースURL（任意。省略時はこのサイトの /api を使用）"]),
+        endpointInput
+      ])
     ]),
     el("div", {class:"row"}, [
-      el("input", {type:"url", placeholder:"https://example.com/upload", value: cfg.url, onChange: (e) => {
-        cfg.url = e.target.value;
-      }}),
-      el("input", {type:"text", placeholder:"Authorizationヘッダー（任意）", value: cfg.token || "", onChange: (e) => {
-        cfg.token = e.target.value;
-      }}),
-      el("button", {class:"btn btn--muted", onClick: () => {
-        saveCloudConfig(cfg);
-        alert("クラウド設定を保存しました。");
-      }}, ["設定を保存"]),
-      el("button", {class:"btn", onClick: (e) => syncToCloud(e.target)}, ["クラウドにアップロード"])
+      btnSaveCloud,
+      btnPull,
+      btnPush,
+      btnForce
     ]),
+    cloudMessage,
+    cloudConflictNode,
+    cloudMetaNode,
     el("div", {class:"small"}, [
-      "送信データ: { appVersion, exportedAt, questionsCount, stats, progress }"
+      "同期するデータ: { state: progress v2 JSON, version, updatedAt } / API: GET・PUT /api/state"
     ]),
     el("div", {class:"hr"}, []),
     el("div", {class:"small"}, [`現在の総問題数: ${st.total}`]),
@@ -750,61 +907,114 @@ function pickFile(accept, cb){
 }
 
 function loadCloudConfig(){
-  try{
-    const cfg = JSON.parse(localStorage.getItem(CLOUD_CONFIG_KEY) || "{}");
-    return {
-      url: cfg.url || "",
-      token: cfg.token || ""
-    };
-  }catch(e){
-    return {url:"", token:""};
-  }
+  const legacy = safeJsonParse(localStorage.getItem("neuroStudyCloudConfig_v1"), {});
+  const cfg = safeJsonParse(localStorage.getItem(CLOUD_CONFIG_KEY), {}) || {};
+  return {
+    apiBase: cfg.apiBase || legacy.url || "",
+    token: cfg.token || legacy.token || ""
+  };
 }
 
 function saveCloudConfig(cfg){
   localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify({
-    url: cfg.url || "",
+    apiBase: cfg.apiBase || "",
     token: cfg.token || ""
   }));
 }
 
-async function syncToCloud(btn){
-  const cfg = loadCloudConfig();
-  if(!cfg.url){
-    alert("クラウドのURLを設定してください。");
-    return;
-  }
-  const payload = {
-    appVersion: APP_VERSION,
-    exportedAt: nowISO(),
-    questionsCount: QUESTIONS.length,
-    stats: getStats(),
-    progress: loadProgress()
+function loadCloudStatus(){
+  return safeJsonParse(localStorage.getItem(CLOUD_STATUS_KEY), {
+    lastSyncedAt: null,
+    lastRemoteVersion: null,
+    lastRemoteUpdatedAt: null
+  }) || {
+    lastSyncedAt: null,
+    lastRemoteVersion: null,
+    lastRemoteUpdatedAt: null
   };
-  if(btn){
-    btn.setAttribute("disabled", "disabled");
-    btn.textContent = "アップロード中…";
-  }
+}
+
+function saveCloudStatus(st){
+  localStorage.setItem(CLOUD_STATUS_KEY, JSON.stringify(st || {}));
+}
+
+function buildApiUrl(cfg, path){
+  const base = (cfg && cfg.apiBase) ? cfg.apiBase : "";
   try{
-    const res = await fetch(cfg.url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(cfg.token ? {Authorization: cfg.token} : {})
-      },
-      body: JSON.stringify(payload)
-    });
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
-    alert("アップロードしました。ChatGPT/Codexに保存先URLやIDを共有してください。");
-  }catch(e){
-    console.error(e);
-    alert("アップロードに失敗しました: " + e.message);
-  }finally{
-    if(btn){
-      btn.removeAttribute("disabled");
-      btn.textContent = "クラウドにアップロード";
+    if(base){
+      return new URL(path, base).toString();
     }
+  }catch(e){
+    // fallback
   }
+  return path;
+}
+
+class CloudConflictError extends Error{
+  constructor(payload){
+    super("クラウドデータが別の端末で更新されています。");
+    this.payload = payload;
+  }
+}
+
+async function fetchCloudState(cfg){
+  const url = buildApiUrl(cfg, "/api/state");
+  const headers = {
+    "Accept": "application/json",
+    ...(cfg.token ? {Authorization: `Bearer ${cfg.token}`} : {})
+  };
+  const res = await fetch(url, {headers, cache:"no-store"});
+  if(res.status === 401 || res.status === 403){
+    throw new Error("認証に失敗しました。同期トークンを確認してください。");
+  }
+  if(!res.ok){
+    throw new Error(`クラウド取得に失敗しました (HTTP ${res.status})`);
+  }
+  const json = await res.json();
+  return {
+    state: json.state || null,
+    version: json.version ?? null,
+    updatedAt: json.updatedAt || null
+  };
+}
+
+async function pushCloudState(cfg, meta, options={}){
+  const url = buildApiUrl(cfg, "/api/state");
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    ...(cfg.token ? {Authorization: `Bearer ${cfg.token}`} : {})
+  };
+  const progress = loadProgress();
+  const selectedBase = options.force ? (options.baseVersion ?? meta.lastRemoteVersion ?? null) : (meta.lastRemoteVersion ?? null);
+  const baseVersion = (selectedBase === null || selectedBase === undefined || Number.isNaN(Number(selectedBase))) ? null : Number(selectedBase);
+  const body = {
+    state: progress,
+    baseVersion: baseVersion,
+    force: !!options.force
+  };
+  const res = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify(body),
+    cache:"no-store"
+  });
+  if(res.status === 401 || res.status === 403){
+    throw new Error("認証に失敗しました。同期トークンを確認してください。");
+  }
+  if(res.status === 409){
+    const payload = await res.json().catch(()=> ({}));
+    throw new CloudConflictError(payload);
+  }
+  if(!res.ok){
+    throw new Error(`クラウド保存に失敗しました (HTTP ${res.status})`);
+  }
+  const json = await res.json();
+  return {
+    version: json.version ?? null,
+    updatedAt: json.updatedAt || nowISO(),
+    state: json.state || progress
+  };
 }
 
 /* -------- Mock result import -------- */

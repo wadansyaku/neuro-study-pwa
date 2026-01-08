@@ -1,5 +1,6 @@
 // Simple cache-first Service Worker
-const CACHE_NAME = "neuro-study-pwa-v5";
+const cacheSuffix = new URL(self.location).searchParams.get("v") || "v1";
+const CACHE_NAME = `neuro-study-pwa-${cacheSuffix}`;
 const BASE_URL = self.location;
 const ASSETS = [
   "./",

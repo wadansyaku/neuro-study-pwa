@@ -1,15 +1,42 @@
 import { sql } from "@vercel/postgres";
+import { timingSafeEqual } from "crypto";
 
 const ROW_ID = "default";
+let didEnsureTable = false;
 
-function setCors(res){
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,PUT,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+function parseAllowedOrigins(){
+  const raw = process.env.SYNC_ALLOWED_ORIGINS || "";
+  return raw.split(",").map(v => v.trim()).filter(Boolean);
 }
 
-function sendJson(res, status, payload){
-  setCors(res);
+function resolveCorsOrigin(req){
+  const origin = req.headers?.origin;
+  if(!origin) return "*";
+  const allowed = parseAllowedOrigins();
+  if(allowed.length === 0){
+    try{
+      const originUrl = new URL(origin);
+      const host = req.headers?.host;
+      if(host && originUrl.host === host){
+        return origin;
+      }
+    }catch(e){
+      return "null";
+    }
+    return "null";
+  }
+  return allowed.includes(origin) ? origin : "null";
+}
+
+function setCors(req, res){
+  res.setHeader("Access-Control-Allow-Origin", resolveCorsOrigin(req));
+  res.setHeader("Access-Control-Allow-Methods", "GET,PUT,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Vary", "Origin");
+}
+
+function sendJson(req, res, status, payload){
+  setCors(req, res);
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.setHeader("Cache-Control", "no-store");
@@ -50,6 +77,12 @@ async function ensureTable(){
   );`;
 }
 
+async function ensureTableOnce(){
+  if(didEnsureTable) return;
+  await ensureTable();
+  didEnsureTable = true;
+}
+
 async function fetchCurrentState(){
   const {rows} = await sql`SELECT state_json, version, updated_at FROM user_state WHERE id = ${ROW_ID} LIMIT 1;`;
   const row = rows[0];
@@ -73,29 +106,65 @@ async function saveState(state, baseVersion){
   };
 }
 
+async function insertInitialState(state){
+  const {rows} = await sql`INSERT INTO user_state (id, state_json, version)
+    VALUES (${ROW_ID}, ${state}, 1)
+    ON CONFLICT (id)
+    DO NOTHING
+    RETURNING version, updated_at;`;
+  const row = rows[0];
+  if(!row) return null;
+  return {
+    version: normalizeVersion(row.version),
+    updatedAt: row.updated_at ? row.updated_at.toISOString() : new Date().toISOString()
+  };
+}
+
+async function updateStateIfVersionMatch(state, baseVersion){
+  if(baseVersion === null || baseVersion === undefined) return null;
+  const {rows} = await sql`UPDATE user_state
+    SET state_json = ${state}, version = version + 1, updated_at = now()
+    WHERE id = ${ROW_ID} AND version = ${baseVersion}
+    RETURNING version, updated_at;`;
+  const row = rows[0];
+  if(!row) return null;
+  return {
+    version: normalizeVersion(row.version),
+    updatedAt: row.updated_at ? row.updated_at.toISOString() : new Date().toISOString()
+  };
+}
+
+function isTokenValid(incoming, expected){
+  if(!incoming || !expected) return false;
+  const incomingBuf = Buffer.from(incoming);
+  const expectedBuf = Buffer.from(expected);
+  if(incomingBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(incomingBuf, expectedBuf);
+}
+
 export default async function handler(req, res){
-  setCors(res);
+  setCors(req, res);
   if(req.method === "OPTIONS"){
     res.statusCode = 200;
     res.end();
     return;
   }
   if(req.method !== "GET" && req.method !== "PUT"){
-    return sendJson(res, 405, {error: "Method Not Allowed"});
+    return sendJson(req, res, 405, {error: "Method Not Allowed"});
   }
   if(!process.env.SYNC_TOKEN){
-    return sendJson(res, 500, {error: "SYNC_TOKEN is not configured"});
+    return sendJson(req, res, 500, {error: "SYNC_TOKEN is not configured"});
   }
   const incomingToken = extractToken(req);
-  if(incomingToken !== process.env.SYNC_TOKEN){
-    return sendJson(res, 401, {error: "Unauthorized"});
+  if(!isTokenValid(incomingToken, process.env.SYNC_TOKEN)){
+    return sendJson(req, res, 401, {error: "Unauthorized"});
   }
 
   try{
-    await ensureTable();
+    await ensureTableOnce();
     if(req.method === "GET"){
       const current = await fetchCurrentState();
-      return sendJson(res, 200, current || {state:null, version:null, updatedAt:null});
+      return sendJson(req, res, 200, current || {state:null, version:null, updatedAt:null});
     }
 
     // PUT
@@ -103,28 +172,50 @@ export default async function handler(req, res){
     try{
       body = await readJsonBody(req);
     }catch(e){
-      return sendJson(res, 400, {error: "Invalid JSON body"});
+      return sendJson(req, res, 400, {error: "Invalid JSON body"});
     }
     const state = body.state;
     const baseVersion = normalizeVersion(body.baseVersion);
     const force = !!body.force;
     if(!state || typeof state !== "object" || Array.isArray(state)){
-      return sendJson(res, 400, {error: "state must be a JSON object"});
+      return sendJson(req, res, 400, {error: "state must be a JSON object"});
     }
 
     const existing = await fetchCurrentState();
     const currentVersion = existing ? existing.version : null;
-    if(existing && !force){
-      if(baseVersion === null || baseVersion !== currentVersion){
-        return sendJson(res, 409, existing);
-      }
+    if(force){
+      const result = await saveState(state, currentVersion);
+      return sendJson(req, res, 200, {...result, state});
     }
 
-    const result = await saveState(state, currentVersion);
-    return sendJson(res, 200, {...result, state});
+    if(existing){
+      if(baseVersion === null || baseVersion !== currentVersion){
+        return sendJson(req, res, 409, existing);
+      }
+      const updated = await updateStateIfVersionMatch(state, baseVersion);
+      if(!updated){
+        const latest = await fetchCurrentState();
+        return sendJson(req, res, 409, latest || {state:null, version:null, updatedAt:null});
+      }
+      return sendJson(req, res, 200, {...updated, state});
+    }
+
+    if(baseVersion !== null && baseVersion !== 0){
+      return sendJson(req, res, 409, {state:null, version:null, updatedAt:null});
+    }
+    const inserted = await insertInitialState(state);
+    if(inserted){
+      return sendJson(req, res, 200, {...inserted, state});
+    }
+    const updated = await updateStateIfVersionMatch(state, baseVersion ?? 0);
+    if(updated){
+      return sendJson(req, res, 200, {...updated, state});
+    }
+    const latest = await fetchCurrentState();
+    return sendJson(req, res, 409, latest || {state:null, version:null, updatedAt:null});
   }catch(err){
     console.error(err);
     if(res.writableEnded) return;
-    return sendJson(res, 500, {error: "Internal Server Error"});
+    return sendJson(req, res, 500, {error: "Internal Server Error"});
   }
 }

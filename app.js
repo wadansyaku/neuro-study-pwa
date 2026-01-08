@@ -8,6 +8,9 @@ const ONGOING_TEST_KEY = "neuroStudyOngoingTest_v1";
 const CUSTOM_DATA_KEY = "neuroStudyCustomData_v1"; // optional override
 const CLOUD_CONFIG_KEY = "neuroStudyCloudConfig_v2"; // cloud sync endpoint/token
 const CLOUD_STATUS_KEY = "neuroStudyCloudStatus_v1"; // last sync metadata
+const CLOUD_SESSION_TOKEN_KEY = "neuroStudyCloudToken_session";
+
+let PROGRESS_CORRUPT_INFO = null;
 
 const SR_REASON_OPTIONS = [
   "知識不足",
@@ -64,7 +67,7 @@ function padQuestionNumber(num){
   return `Q${String(num).padStart(3,"0")}`;
 }
 
-/* -------- Progress model (v2) -------- */
+/* -------- Progress model (v3) -------- */
 let PROGRESS_CACHE = null;
 
 function defaultSr(){
@@ -141,9 +144,21 @@ function normalizeProgress(p){
 }
 
 function loadProgressStored(){
-  const obj = safeJsonParse(localStorage.getItem(PROGRESS_KEY_V2), null);
-  if(obj && obj.version >= 2){
-    return normalizeProgress(obj);
+  const raw = localStorage.getItem(PROGRESS_KEY_V2);
+  if(!raw) return null;
+  try{
+    const obj = JSON.parse(raw);
+    if(obj && obj.version >= 2){
+      return normalizeProgress(obj);
+    }
+  }catch(e){
+    PROGRESS_CORRUPT_INFO = {
+      detectedAt: nowISO(),
+      rawLength: raw.length
+    };
+    localStorage.setItem(`${PROGRESS_KEY_V2}_corrupt_backup`, raw);
+    localStorage.setItem(`${PROGRESS_KEY_V2}_corrupt_at`, JSON.stringify(PROGRESS_CORRUPT_INFO.detectedAt));
+    localStorage.removeItem(PROGRESS_KEY_V2);
   }
   return null;
 }
@@ -611,8 +626,14 @@ function renderData(){
   const cfgRef = loadCloudConfig();
   let cloudMeta = loadCloudStatus();
   let conflictPayload = null;
+  const corruptInfo = PROGRESS_CORRUPT_INFO || safeJsonParse(localStorage.getItem(`${PROGRESS_KEY_V2}_corrupt_at`), null);
 
   const cloudMessage = el("div", {class:"status status--muted"}, ["クラウド同期は任意設定です。オフラインでも学習できます。"]);
+  const corruptMessage = el("div", {class:"status status--warn", style: corruptInfo ? "" : "display:none"}, [
+    "⚠️ 進捗データの破損を検知しました。バックアップを保存しました（",
+    typeof corruptInfo === "string" ? corruptInfo : (corruptInfo?.detectedAt || "日時不明"),
+    "）。JSONのインポートで復旧できるか確認してください。"
+  ]);
   const cloudMetaNode = el("div", {class:"small"}, []);
   const cloudConflictNode = el("div", {class:"small status status--warn"}, []);
   const normalizeVersion = (v) => {
@@ -647,6 +668,11 @@ function renderData(){
     placeholder:"同期トークン（Bearerトークン）",
     value: cfgRef.token,
     onChange: (e) => { cfgRef.token = e.target.value.trim(); }
+  });
+  const rememberToggle = el("input", {
+    type:"checkbox",
+    checked: cfgRef.rememberToken ? "checked" : undefined,
+    onChange: (e) => { cfgRef.rememberToken = e.target.checked; }
   });
   const endpointInput = el("input", {
     type:"url",
@@ -782,12 +808,16 @@ function renderData(){
     el("div", {class:"hr"}, []),
     el("div", {class:"h2"}, ["クラウド同期（単一ユーザー用）"]),
     el("div", {class:"small"}, [
-      "Vercel Functions / Postgres に学習履歴（progress v2）を同期します。トークンで認証し、バージョンで衝突を検出します。"
+      "Vercel Functions / Postgres に学習履歴（progress v3）を同期します。トークンで認証し、バージョンで衝突を検出します。"
     ]),
     el("div", {class:"cloud-grid"}, [
       el("div", {class:"cloud-grid__item"}, [
-        el("div", {class:"small"}, ["同期トークン（必須。画面には保存されますがマスク表示）"]),
+        el("div", {class:"small"}, ["同期トークン（必須。入力はマスク表示）"]),
         tokenInput,
+        el("label", {class:"small"}, [
+          rememberToggle,
+          " この端末にトークンを保存する（共有端末ではOFF推奨）"
+        ])
       ]),
       el("div", {class:"cloud-grid__item"}, [
         el("div", {class:"small"}, ["APIベースURL（任意。省略時はこのサイトの /api を使用）"]),
@@ -801,10 +831,11 @@ function renderData(){
       btnForce
     ]),
     cloudMessage,
+    corruptMessage,
     cloudConflictNode,
     cloudMetaNode,
     el("div", {class:"small"}, [
-      "同期するデータ: { state: progress v2 JSON, version, updatedAt } / API: GET・PUT /api/state"
+      "同期するデータ: { state: progress v3 JSON, version, updatedAt } / API: GET・PUT /api/state"
     ]),
     el("div", {class:"hr"}, []),
     el("div", {class:"small"}, [`現在の総問題数: ${st.total}`]),
@@ -909,17 +940,28 @@ function pickFile(accept, cb){
 function loadCloudConfig(){
   const legacy = safeJsonParse(localStorage.getItem("neuroStudyCloudConfig_v1"), {});
   const cfg = safeJsonParse(localStorage.getItem(CLOUD_CONFIG_KEY), {}) || {};
+  const rememberToken = cfg.rememberToken ?? !!(cfg.token || legacy.token);
+  const sessionToken = safeJsonParse(sessionStorage.getItem(CLOUD_SESSION_TOKEN_KEY), "");
+  const resolvedToken = rememberToken ? (cfg.token || legacy.token || "") : (sessionToken || cfg.token || legacy.token || "");
   return {
     apiBase: cfg.apiBase || legacy.url || "",
-    token: cfg.token || legacy.token || ""
+    token: resolvedToken,
+    rememberToken
   };
 }
 
 function saveCloudConfig(cfg){
+  const rememberToken = !!cfg.rememberToken;
   localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify({
     apiBase: cfg.apiBase || "",
-    token: cfg.token || ""
+    token: rememberToken ? (cfg.token || "") : "",
+    rememberToken
   }));
+  if(rememberToken){
+    sessionStorage.removeItem(CLOUD_SESSION_TOKEN_KEY);
+  }else{
+    sessionStorage.setItem(CLOUD_SESSION_TOKEN_KEY, JSON.stringify(cfg.token || ""));
+  }
 }
 
 function loadCloudStatus(){
@@ -1736,7 +1778,7 @@ async function registerSW(){
     return;
   }
   try{
-    await navigator.serviceWorker.register("./sw.js");
+    await navigator.serviceWorker.register(`./sw.js?v=${APP_VERSION}`);
     elStatus.textContent = "（オフライン対応OK）";
   }catch(e){
     elStatus.textContent = "（オフライン対応: 未設定）";

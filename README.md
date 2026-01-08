@@ -31,16 +31,16 @@
 - 進捗表示（正答率・間違い上位・理由ランキング・タグ別Due）
 - 解答後に Again/Hard/Good/Easy で間隔反復を更新
 - 誤答理由（固定候補）と短いメモを記録可能
-- 学習履歴のJSON書き出し/読み込み（v1→v2へ自動移行）
+- 学習履歴のJSON書き出し/読み込み（v1→v3へ自動移行）
 - 問題データJSONの差し替え（端末内）
 
 ## 注意
 - 学習履歴は端末内に保存されます。端末を変える場合は「学習履歴を書き出す」で移行してください。
 
-## 進捗データ（v2）と移行
-- localStorage キー: `neuroStudyProgressV2`
-- 旧バージョン（v1）のデータは初回起動時に自動で v2 へ移行します（正答/誤答の累積と最終解答日時を引き継ぎ、SRは今日からスタート）。
-- エクスポート/インポートは v2 スキーマを含む JSON です。破損データは読み込み時にエラーメッセージを表示します。
+## 進捗データ（v3）と移行
+- localStorage キー: `neuroStudyProgressV2`（スキーマは v3）
+- 旧バージョン（v1）のデータは初回起動時に自動で v3 へ移行します（正答/誤答の累積と最終解答日時を引き継ぎ、SRは今日からスタート）。
+- エクスポート/インポートは v3 スキーマを含む JSON です。破損データは読み込み時にエラーメッセージを表示します。
 
 ## デプロイ（Vercel GUIで最短）
 ビルド不要の静的ホスティングで動きます。GitHub Pages / Vercel の両方で相対パス動作を確認するため、manifest / SW / questions.json の参照は相対URLにしています。
@@ -61,6 +61,7 @@ GitHub Pages での手順は `GITHUB_PAGES_STEPS.md` も参照してください
 2. Vercel Postgres を **Add Integration** する（DATABASE_URL / POSTGRES_URL が自動で環境変数に入ります）
 3. 環境変数を設定する  
    - `SYNC_TOKEN`: 任意の長い文字列（Bearerトークンとして使用）  
+   - `SYNC_ALLOWED_ORIGINS`: CORS許可オリジン（カンマ区切り）。未設定なら同一オリジンのみ許可  
    - Postgres の接続変数（`POSTGRES_URL` など）はIntegrationが自動付与
 4. 再デプロイすると `/api/health`・`/api/state` が使えます（Service Worker / manifest は vercel.json で no-store ヘッダー）
 
@@ -76,7 +77,7 @@ CREATE TABLE IF NOT EXISTS user_state (
 );
 ```
 
-格納するデータは localStorage `neuroStudyProgressV2` をそのまま JSON として保存し、`version` をインクリメントして衝突検知に使います。
+格納するデータは localStorage `neuroStudyProgressV2`（v3スキーマ）をそのまま JSON として保存し、`version` をインクリメントして衝突検知に使います。
 
 ### API概要
 - `GET /api/health` : 200 / `{ok: true}`  
@@ -91,8 +92,8 @@ CREATE TABLE IF NOT EXISTS user_state (
 1. 画面上部「データ」タブ → 「クラウド同期」セクションを開く  
 2. **同期トークン** に `SYNC_TOKEN` を入力（マスク保存）。必要なら API ベースURLも設定（空なら同一ドメインの `/api` を使用）  
 3. 「設定を保存」→  
-   - 「クラウドから取得」: DBの progress v2 を localStorage に復元  
-   - 「クラウドへ送信」: localStorage の progress v2 を DB に保存（`baseVersion` 一致を確認）  
+   - 「クラウドから取得」: DBの progress v3 を localStorage に復元  
+   - 「クラウドへ送信」: localStorage の progress v3 を DB に保存（`baseVersion` 一致を確認）  
    - 衝突時は警告 + 「クラウドを強制上書き」ボタンで明示的に上書き可能
 4. 最終同期時刻 / クラウド側の version を表示。同期に失敗しても学習機能はそのまま使えます（オフライン対応）。
 

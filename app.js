@@ -32,6 +32,7 @@ let QUESTIONS = []; // array of question objects
 let INDEX = {}; // id -> question
 let DECKS = [];
 let ACTIVE_DECK = null;
+let CURRENT_VIEW = "init";
 
 function deckScopedKey(baseKey, deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID){
   return `${baseKey}_${deckId}`;
@@ -109,6 +110,11 @@ function uniq(arr){
 }
 function padQuestionNumber(num){
   return `Q${String(num).padStart(3,"0")}`;
+}
+
+function setCurrentView(name){
+  CURRENT_VIEW = name;
+  console.log("[view] change", {view: CURRENT_VIEW, path: location.pathname});
 }
 
 /* -------- Progress model (v3) -------- */
@@ -568,6 +574,7 @@ function mount(node){
 
 /* -------- UI: Home / Stats / Data -------- */
 function renderHome(){
+  setCurrentView("home");
   const st = getStats();
   const progressPct = st.total ? Math.round((st.attempted/st.total)*100) : 0;
   const dueSummary = summarizeDue();
@@ -635,6 +642,7 @@ function renderHome(){
 }
 
 function renderStats(){
+  setCurrentView("stats");
   const st = getStats();
   const p = loadProgress();
   const dueSummary = summarizeDue();
@@ -700,7 +708,7 @@ function renderStats(){
 }
 
 function renderData(){
-  const st = getStats();
+  setCurrentView("data");
   const cfgRef = loadCloudConfig();
   let cloudMeta = loadCloudStatus();
   let conflictPayload = null;
@@ -714,6 +722,8 @@ function renderData(){
   ]);
   const cloudMetaNode = el("div", {class:"small"}, []);
   const cloudConflictNode = el("div", {class:"small status status--warn"}, []);
+  const importStatusNode = el("div", {class:"status status--muted", style:"display:none"}, []);
+  const dataSummaryNode = el("div", {class:"small"}, []);
   const normalizeVersion = (v) => {
     if(v === null || v === undefined) return null;
     const num = Number(v);
@@ -740,6 +750,19 @@ function renderData(){
     cloudMessage.className = `status status--${variant}`;
     setNodeText(cloudMessage, msg);
   }
+
+  function setImportMessage(msg, variant="info"){
+    importStatusNode.className = `status status--${variant}`;
+    importStatusNode.style.display = "block";
+    setNodeText(importStatusNode, msg);
+  }
+
+  function refreshDataSummary(){
+    const latestStats = getStats();
+    const source = DATA?.source || "(不明)";
+    setNodeText(dataSummaryNode, `現在の総問題数: ${latestStats.total} / source: ${source}`);
+  }
+  refreshDataSummary();
 
   const tokenInput = el("input", {
     type:"password",
@@ -854,6 +877,16 @@ function renderData(){
   btnPush.addEventListener("click", () => handlePush(false));
   btnForce.addEventListener("click", () => handlePush(true));
 
+  const importInput = el("input", {
+    type:"file",
+    accept:"application/json",
+    onChange: async (e) => {
+      const file = e.target.files?.[0];
+      await handleQuestionsImport(file, setImportMessage, refreshDataSummary);
+      e.target.value = "";
+    }
+  });
+
   const node = viewCard("データ", [
     el("div", {class:"p"}, [
       "・学習履歴は端末内（localStorage）に保存されます。\n" +
@@ -875,7 +908,7 @@ function renderData(){
     el("div", {class:"small"}, ["JSONを差し替えるか、インポートで上書きできます（端末内のみ）。"]),
     el("div", {class:"row"}, [
       el("button", {class:"btn btn--muted", onClick: exportQuestions}, ["問題データを書き出す（JSON）"]),
-      el("button", {class:"btn btn--muted", onClick: importQuestions}, ["問題データをインポート（JSON）"]),
+      el("button", {class:"btn btn--muted", onClick: () => importInput.click()}, ["問題データをインポート（JSON）"]),
       el("button", {class:"btn btn--danger", onClick: () => {
         if(confirm("カスタム問題データを解除して、同梱データに戻します。よろしいですか？")){
           localStorage.removeItem(customDataKey());
@@ -883,6 +916,9 @@ function renderData(){
         }
       }}, ["同梱データに戻す"])
     ]),
+    el("div", {class:"small"}, ["ファイルから読み込み（.json）:"]),
+    importInput,
+    importStatusNode,
     el("div", {class:"hr"}, []),
     el("div", {class:"h2"}, ["クラウド同期（単一ユーザー用）"]),
     el("div", {class:"small"}, [
@@ -916,7 +952,7 @@ function renderData(){
       "同期するデータ: { state: progress v3 JSON, version, updatedAt } / API: GET・PUT /api/state"
     ]),
     el("div", {class:"hr"}, []),
-    el("div", {class:"small"}, [`現在の総問題数: ${st.total}`]),
+    dataSummaryNode,
   ]);
   mount(node);
 }
@@ -987,18 +1023,156 @@ function exportQuestions(){
   const d = localStorage.getItem(customDataKey()) || JSON.stringify(DATA);
   downloadText(`${ACTIVE_DECK?.id || DEFAULT_DECK_ID}_questions_v${APP_VERSION}.json`, d);
 }
+
+function normalizeQuestionTypeRaw(type){
+  if(type === "short") return "短答";
+  if(type === "multi") return "複数選択";
+  return "単一選択";
+}
+
+function validateAndNormalizeQuestion(q, idx){
+  const errors = [];
+  if(!q || typeof q !== "object"){
+    return {ok:false, error:`Q#${idx+1}: invalid question object`};
+  }
+  if(!q.id || typeof q.id !== "string") errors.push("missing id");
+  if(!q.type || typeof q.type !== "string") errors.push("missing type");
+  if(!q.stem || typeof q.stem !== "string") errors.push("missing stem");
+  if(!Array.isArray(q.answer) || q.answer.length === 0) errors.push("missing answer");
+
+  const type = q.type;
+  if(type === "short"){
+    if(!Array.isArray(q.answer) || q.answer.some(a => typeof a !== "string" || !a.trim())){
+      errors.push("short answer must be string array");
+    }
+  }else if(type === "single" || type === "multi"){
+    if(!q.options || typeof q.options !== "object"){
+      errors.push("options are required");
+    }else{
+      const optionKeys = Object.keys(q.options || {});
+      const answers = Array.isArray(q.answer) ? q.answer : [];
+      if(answers.length === 0 || answers.some(a => !optionKeys.includes(a))){
+        errors.push("answer must be option keys");
+      }
+    }
+  }else{
+    errors.push(`unsupported type: ${type}`);
+  }
+
+  if(errors.length){
+    return {ok:false, error:`${q.id || `Q#${idx+1}`}: ${errors.join(", ")}`};
+  }
+
+  const normalized = {
+    ...q,
+    type_raw: q.type_raw || normalizeQuestionTypeRaw(type),
+    options: q.options || {}
+  };
+  return {ok:true, value: normalized};
+}
+
+function summarizeQuestionTypes(list){
+  const counts = {};
+  (list || []).forEach(q => {
+    const key = q.type || "unknown";
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  return counts;
+}
+
+async function handleQuestionsImport(file, setStatus, refreshSummary){
+  if(!file){
+    setStatus("ファイルが選択されていません。", "warn");
+    console.warn("[import] no file selected");
+    return;
+  }
+  console.log("[import] file selected", {name: file.name, size: file.size});
+  let text = "";
+  try{
+    text = await file.text();
+  }catch(e){
+    console.error("[import] file read failed", e);
+    setStatus("ファイルの読み込みに失敗しました。", "warn");
+    return;
+  }
+
+  let obj = null;
+  try{
+    obj = JSON.parse(text);
+    console.log("[import] JSON parse ok", {keys: Object.keys(obj || {})});
+  }catch(e){
+    console.error("[import] JSON parse failed", e);
+    setStatus("JSONのパースに失敗しました。", "warn");
+    return;
+  }
+
+  if(!obj || typeof obj !== "object"){
+    setStatus("JSONがオブジェクト形式ではありません。", "warn");
+    return;
+  }
+  if(typeof obj.version !== "number"){
+    setStatus("version が数値ではありません。", "warn");
+    return;
+  }
+  if(typeof obj.source !== "string" || !obj.source.trim()){
+    setStatus("source が文字列ではありません。", "warn");
+    return;
+  }
+  if(!Array.isArray(obj.questions)){
+    setStatus("questions が配列ではありません。", "warn");
+    return;
+  }
+
+  console.log("[import] questions length", obj.questions.length);
+  const typeCounts = summarizeQuestionTypes(obj.questions);
+  console.log("[import] type counts", typeCounts);
+
+  const valid = [];
+  const rejected = [];
+  obj.questions.forEach((q, idx) => {
+    const res = validateAndNormalizeQuestion(q, idx);
+    if(res.ok){
+      valid.push(res.value);
+    }else{
+      rejected.push({index: idx + 1, id: q?.id || null, reason: res.error});
+    }
+  });
+
+  if(rejected.length){
+    console.warn("[import] validation rejected", {rejected: rejected.length});
+    console.table(rejected.slice(0, 50));
+  }
+
+  if(valid.length === 0){
+    setStatus("有効な問題が0件です。JSONの内容を確認してください。", "warn");
+    return;
+  }
+
+  const payload = {
+    version: obj.version,
+    source: obj.source,
+    questions: valid
+  };
+  localStorage.setItem(customDataKey(), JSON.stringify(payload));
+  clearOngoingTest();
+  await initData();
+  refreshSummary();
+
+  const message = `import成功: ${payload.source} / ${valid.length}件（除外 ${rejected.length}件）`;
+  console.log("[import] success", {source: payload.source, count: valid.length});
+  setStatus(message, rejected.length ? "warn" : "ok");
+}
+
 function importQuestions(){
   pickFile(".json", async (txt) => {
-    try{
-      const obj = JSON.parse(txt);
-      if(!obj.questions || !Array.isArray(obj.questions)) throw new Error("bad");
-      localStorage.setItem(customDataKey(), JSON.stringify(obj));
-      alert("問題データを上書きしました。");
-      await initData();
-      renderHome();
-    }catch(e){
-      alert("問題データとして読み込めませんでした。");
-    }
+    const tmpFile = new File([txt], "import.json", {type:"application/json"});
+    await handleQuestionsImport(tmpFile, (msg, variant) => {
+      if(variant === "ok"){
+        alert(msg);
+      }else{
+        alert(msg);
+      }
+    }, () => {});
   });
 }
 
@@ -1190,6 +1364,7 @@ function undoLastImport(){
 }
 
 function renderMockImport(){
+  setCurrentView("mockImport");
   const inputSingle = el("textarea", {rows:3, placeholder:"例）ABAAD--EBABC...（100文字）"});
   const inputLines = el("textarea", {rows:6, placeholder:"例）1 A\\n2 B\\n3 -  または  1:A,2:B,3:-"});
   const status = el("div", {class:"small"}, []);
@@ -1275,6 +1450,7 @@ function buildTopicMap(){
 }
 
 function renderTopicSelect(){
+  setCurrentView("topicSelect");
   const byTopic = buildTopicMap();
   const topics = Object.keys(byTopic).sort((a,b)=> byTopic[b].length - byTopic[a].length);
 
@@ -1983,10 +2159,27 @@ async function registerSW(){
   }
 }
 
-document.getElementById("navHome").addEventListener("click", renderHome);
-document.getElementById("navStats").addEventListener("click", renderStats);
-document.getElementById("navData").addEventListener("click", renderData);
-document.getElementById("navImport").addEventListener("click", renderMockImport);
+document.getElementById("navHome").addEventListener("click", () => {
+  console.log("[nav] home clicked", {path: location.pathname, view: CURRENT_VIEW});
+  renderHome();
+});
+document.getElementById("navStats").addEventListener("click", () => {
+  console.log("[nav] stats clicked", {path: location.pathname, view: CURRENT_VIEW});
+  renderStats();
+});
+document.getElementById("navData").addEventListener("click", () => {
+  console.log("[nav] data clicked", {path: location.pathname, view: CURRENT_VIEW});
+  try{
+    renderData();
+  }catch(e){
+    console.error("[nav] renderData failed", e);
+    mount(viewCard("エラー", [el("div", {class:"p"}, ["データ画面の表示に失敗しました。コンソールのエラーを確認してください。"])]));
+  }
+});
+document.getElementById("navImport").addEventListener("click", () => {
+  console.log("[nav] mock import clicked", {path: location.pathname, view: CURRENT_VIEW});
+  renderMockImport();
+});
 
 async function initApp(){
   await initDecks();

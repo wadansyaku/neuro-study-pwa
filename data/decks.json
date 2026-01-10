@@ -1,0 +1,4 @@
+[
+  {"id":"neuro","label":"神経解剖","path":"./data/questions.json"},
+  {"id":"forensics","label":"法医学","path":"./data/questions_forensics_v1.json"}
+]

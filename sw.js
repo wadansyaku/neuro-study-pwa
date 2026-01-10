@@ -8,7 +8,9 @@ const ASSETS = [
   "./style.css",
   "./app.js",
   "./manifest.webmanifest",
+  "./data/decks.json",
   "./data/questions.json",
+  "./data/questions_forensics_v1.json",
   "./icons/icon-192.png",
   "./icons/icon-512.png"
 ].map((path) => new URL(path, BASE_URL).toString());

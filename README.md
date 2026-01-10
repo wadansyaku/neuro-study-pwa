@@ -2,6 +2,7 @@
 
 このフォルダは **スマホで学習できる簡単なWebアプリ** です（オフライン対応）。
 同梱の questions.json（100問）で、クイズ練習と「90分100問」の模擬テストができます。
+デッキ切替により、神経解剖と法医学など複数の問題セットを選べます。
 新しく spaced repetition（Anki風）と「今日の復習」キュー、誤答理由メモを追加し、学習効率を高めました。
 
 ## 使い方（最短）
@@ -33,17 +34,64 @@
 - 誤答理由（固定候補）と短いメモを記録可能
 - 学習履歴のJSON書き出し/読み込み（v1→v3へ自動移行）
 - 問題データJSONの差し替え（端末内）
+- デッキ切替（複数の問題セットを選択）
+- 短答（穴埋め）問題タイプ
 
 ## 注意
 - 学習履歴は端末内に保存されます。端末を変える場合は「学習履歴を書き出す」で移行してください。
 
+## デッキ追加方法
+1. `data/decks.json` にデッキ定義を追加する  
+   例:
+   ```json
+   [
+     {"id":"neuro","label":"神経解剖","path":"./data/questions.json"},
+     {"id":"forensics","label":"法医学","path":"./data/questions_forensics_v1.json"}
+   ]
+   ```
+2. `path` で指定した JSON を配置する（相対パス推奨）
+3. アプリ起動後、画面上部のデッキ選択で切り替えられます
+
+## 問題データのフォーマット
+共通フィールド: `id`, `type`, `type_raw`, `stem`, `answer`, `explanation`, `tag`, `topic`
+
+### single（単一選択）
+```json
+{
+  "id": "Q001",
+  "type": "single",
+  "type_raw": "単一選択",
+  "stem": "...",
+  "options": { "A":"...", "B":"..." },
+  "answer": ["B"],
+  "explanation": "...",
+  "tag": "...",
+  "topic": "..."
+}
+```
+
+### short（短答/穴埋め）
+```json
+{
+  "id": "FQ001",
+  "type": "short",
+  "type_raw": "短答",
+  "stem": "【異状死体】医師法21条：何時間以内に届け出？",
+  "options": {},
+  "answer": ["24", "24時間", "24時間以内"],
+  "explanation": "...",
+  "tag": "異状死体",
+  "topic": "法医学"
+}
+```
+
 ## 進捗データ（v3）と移行
-- localStorage キー: `neuroStudyProgressV2`（スキーマは v3）
+- localStorage キー: `neuroStudyProgressV2_<deckId>`（スキーマは v3）
 - 旧バージョン（v1）のデータは初回起動時に自動で v3 へ移行します（正答/誤答の累積と最終解答日時を引き継ぎ、SRは今日からスタート）。
 - エクスポート/インポートは v3 スキーマを含む JSON です。破損データは読み込み時にエラーメッセージを表示します。
 
 ## デプロイ（Vercel GUIで最短）
-ビルド不要の静的ホスティングで動きます。GitHub Pages / Vercel の両方で相対パス動作を確認するため、manifest / SW / questions.json の参照は相対URLにしています。
+ビルド不要の静的ホスティングで動きます。GitHub Pages / Vercel の両方で相対パス動作を確認するため、manifest / SW / decks.json / questions.json の参照は相対URLにしています。
 
 1. GitHubでこのリポジトリを作成（またはFork）する  
 2. Vercel ダッシュボード → **Add New… → Project** → Import from GitHub → リポジトリを選択  
@@ -77,7 +125,7 @@ CREATE TABLE IF NOT EXISTS user_state (
 );
 ```
 
-格納するデータは localStorage `neuroStudyProgressV2`（v3スキーマ）をそのまま JSON として保存し、`version` をインクリメントして衝突検知に使います。
+格納するデータは localStorage `neuroStudyProgressV2_<deckId>`（v3スキーマ）をそのまま JSON として保存し、`version` をインクリメントして衝突検知に使います。
 
 ### API概要
 - `GET /api/health` : 200 / `{ok: true}`  

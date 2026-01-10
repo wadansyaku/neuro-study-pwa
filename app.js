@@ -1,11 +1,13 @@
 /* 神経解剖学 学習Webアプリ - Vanilla JS / Offline-first */
 
-const APP_VERSION = 3;
+const APP_VERSION = 4;
 const PROGRESS_VERSION = 3;
-const PROGRESS_KEY_V2 = "neuroStudyProgressV2";
-const PROGRESS_KEY_V1 = "neuroStudyProgress_v1";
-const ONGOING_TEST_KEY = "neuroStudyOngoingTest_v1";
-const CUSTOM_DATA_KEY = "neuroStudyCustomData_v1"; // optional override
+const DEFAULT_DECK_ID = "neuro";
+const DECK_SELECTION_KEY = "neuroStudySelectedDeck_v1";
+const PROGRESS_KEY_V2_BASE = "neuroStudyProgressV2";
+const PROGRESS_KEY_V1_BASE = "neuroStudyProgress_v1";
+const ONGOING_TEST_KEY_BASE = "neuroStudyOngoingTest_v1";
+const CUSTOM_DATA_KEY_BASE = "neuroStudyCustomData_v1"; // optional override
 const CLOUD_CONFIG_KEY = "neuroStudyCloudConfig_v2"; // cloud sync endpoint/token
 const CLOUD_STATUS_KEY = "neuroStudyCloudStatus_v1"; // last sync metadata
 const CLOUD_SESSION_TOKEN_KEY = "neuroStudyCloudToken_session";
@@ -28,6 +30,48 @@ const REVIEW_SET_SIZES = [10,20,30];
 let DATA = null; // {version, source, questions}
 let QUESTIONS = []; // array of question objects
 let INDEX = {}; // id -> question
+let DECKS = [];
+let ACTIVE_DECK = null;
+
+function deckScopedKey(baseKey, deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID){
+  return `${baseKey}_${deckId}`;
+}
+
+function getStoredDeckId(){
+  return localStorage.getItem(DECK_SELECTION_KEY) || DEFAULT_DECK_ID;
+}
+
+function setActiveDeck(deckId){
+  const next = DECKS.find(d => d.id === deckId) || DECKS[0];
+  ACTIVE_DECK = next || {id: DEFAULT_DECK_ID, label:"神経解剖", path:"./data/questions.json"};
+  localStorage.setItem(DECK_SELECTION_KEY, ACTIVE_DECK.id);
+}
+
+function ensureDeckStorageMigration(){
+  if((ACTIVE_DECK?.id || DEFAULT_DECK_ID) !== DEFAULT_DECK_ID) return;
+  const scopedV2 = deckScopedKey(PROGRESS_KEY_V2_BASE, DEFAULT_DECK_ID);
+  const scopedV1 = deckScopedKey(PROGRESS_KEY_V1_BASE, DEFAULT_DECK_ID);
+  const scopedOngoing = deckScopedKey(ONGOING_TEST_KEY_BASE, DEFAULT_DECK_ID);
+  const scopedCustom = deckScopedKey(CUSTOM_DATA_KEY_BASE, DEFAULT_DECK_ID);
+
+  if(!localStorage.getItem(scopedV2) && localStorage.getItem(PROGRESS_KEY_V2_BASE)){
+    localStorage.setItem(scopedV2, localStorage.getItem(PROGRESS_KEY_V2_BASE));
+  }
+  if(!localStorage.getItem(scopedV1) && localStorage.getItem(PROGRESS_KEY_V1_BASE)){
+    localStorage.setItem(scopedV1, localStorage.getItem(PROGRESS_KEY_V1_BASE));
+  }
+  if(!localStorage.getItem(scopedOngoing) && localStorage.getItem(ONGOING_TEST_KEY_BASE)){
+    localStorage.setItem(scopedOngoing, localStorage.getItem(ONGOING_TEST_KEY_BASE));
+  }
+  if(!localStorage.getItem(scopedCustom) && localStorage.getItem(CUSTOM_DATA_KEY_BASE)){
+    localStorage.setItem(scopedCustom, localStorage.getItem(CUSTOM_DATA_KEY_BASE));
+  }
+}
+
+function progressKeyV2(){ return deckScopedKey(PROGRESS_KEY_V2_BASE); }
+function progressKeyV1(){ return deckScopedKey(PROGRESS_KEY_V1_BASE); }
+function ongoingTestKey(){ return deckScopedKey(ONGOING_TEST_KEY_BASE); }
+function customDataKey(){ return deckScopedKey(CUSTOM_DATA_KEY_BASE); }
 
 /* -------- Utils -------- */
 function nowISO(){ return new Date().toISOString(); }
@@ -144,7 +188,7 @@ function normalizeProgress(p){
 }
 
 function loadProgressStored(){
-  const raw = localStorage.getItem(PROGRESS_KEY_V2);
+  const raw = localStorage.getItem(progressKeyV2());
   if(!raw) return null;
   try{
     const obj = JSON.parse(raw);
@@ -156,15 +200,15 @@ function loadProgressStored(){
       detectedAt: nowISO(),
       rawLength: raw.length
     };
-    localStorage.setItem(`${PROGRESS_KEY_V2}_corrupt_backup`, raw);
-    localStorage.setItem(`${PROGRESS_KEY_V2}_corrupt_at`, JSON.stringify(PROGRESS_CORRUPT_INFO.detectedAt));
-    localStorage.removeItem(PROGRESS_KEY_V2);
+    localStorage.setItem(`${progressKeyV2()}_corrupt_backup`, raw);
+    localStorage.setItem(`${progressKeyV2()}_corrupt_at`, JSON.stringify(PROGRESS_CORRUPT_INFO.detectedAt));
+    localStorage.removeItem(progressKeyV2());
   }
   return null;
 }
 
 function loadProgressV1Raw(){
-  return safeJsonParse(localStorage.getItem(PROGRESS_KEY_V1), {});
+  return safeJsonParse(localStorage.getItem(progressKeyV1()), {});
 }
 
 function migrateFromV1(){
@@ -203,15 +247,15 @@ function loadProgress(){
 function saveProgress(p){
   const obj = normalizeProgress(p || {});
   obj.updatedAt = nowMs();
-  localStorage.setItem(PROGRESS_KEY_V2, JSON.stringify(obj));
+  localStorage.setItem(progressKeyV2(), JSON.stringify(obj));
   PROGRESS_CACHE = obj;
   return obj;
 }
 
 function resetProgress(){
-  localStorage.removeItem(PROGRESS_KEY_V2);
-  localStorage.removeItem(PROGRESS_KEY_V1);
-  localStorage.removeItem(ONGOING_TEST_KEY);
+  localStorage.removeItem(progressKeyV2());
+  localStorage.removeItem(progressKeyV1());
+  localStorage.removeItem(ongoingTestKey());
   PROGRESS_CACHE = null;
 }
 
@@ -399,6 +443,11 @@ function gradeAttempt(answerMap){
   let correctCount = 0;
   QUESTIONS.forEach((q, idx) => {
     const key = q.id;
+    if(q.type === "short"){
+      unansweredIds.push(idx+1);
+      wrongIds.push(idx+1);
+      return;
+    }
     const ans = answerMap[key];
     if(ans === undefined){
       unansweredIds.push(idx+1);
@@ -446,6 +495,35 @@ function ensureQuestionTags(){
     }
     if(!Array.isArray(q.concepts)) q.concepts = [];
   });
+}
+
+function validateQuestions(list){
+  const errors = [];
+  (list || []).forEach((q, idx) => {
+    if(!q || typeof q !== "object"){
+      errors.push(`Q#${idx+1}: invalid question object`);
+      return;
+    }
+    if(q.type === "short"){
+      if(!Array.isArray(q.answer) || q.answer.some(a => typeof a !== "string" || !a.trim())){
+        errors.push(`${q.id || `Q#${idx+1}`}: short answer must be string array`);
+      }
+      if(!q.options || typeof q.options !== "object") q.options = {};
+    }else{
+      if(!q.options || typeof q.options !== "object"){
+        errors.push(`${q.id || `Q#${idx+1}`}: options are required`);
+      }else{
+        const optionKeys = Object.keys(q.options || {});
+        const answers = Array.isArray(q.answer) ? q.answer : [];
+        if(answers.length === 0 || answers.some(a => !optionKeys.includes(a))){
+          errors.push(`${q.id || `Q#${idx+1}`}: answer must be option keys`);
+        }
+      }
+    }
+  });
+  if(errors.length){
+    console.warn("Question validation warnings:", errors);
+  }
 }
 
 function getConceptsForQuestion(q){
@@ -626,7 +704,7 @@ function renderData(){
   const cfgRef = loadCloudConfig();
   let cloudMeta = loadCloudStatus();
   let conflictPayload = null;
-  const corruptInfo = PROGRESS_CORRUPT_INFO || safeJsonParse(localStorage.getItem(`${PROGRESS_KEY_V2}_corrupt_at`), null);
+  const corruptInfo = PROGRESS_CORRUPT_INFO || safeJsonParse(localStorage.getItem(`${progressKeyV2()}_corrupt_at`), null);
 
   const cloudMessage = el("div", {class:"status status--muted"}, ["クラウド同期は任意設定です。オフラインでも学習できます。"]);
   const corruptMessage = el("div", {class:"status status--warn", style: corruptInfo ? "" : "display:none"}, [
@@ -779,7 +857,7 @@ function renderData(){
   const node = viewCard("データ", [
     el("div", {class:"p"}, [
       "・学習履歴は端末内（localStorage）に保存されます。\n" +
-      "・問題データは同梱 questions.json を使用します（必要なら差し替え/インポート可）。"
+      "・問題データは選択中デッキの同梱JSONを使用します（必要なら差し替え/インポート可）。"
     ]),
     el("div", {class:"hr"}, []),
     el("div", {class:"row"}, [
@@ -800,7 +878,7 @@ function renderData(){
       el("button", {class:"btn btn--muted", onClick: importQuestions}, ["問題データをインポート（JSON）"]),
       el("button", {class:"btn btn--danger", onClick: () => {
         if(confirm("カスタム問題データを解除して、同梱データに戻します。よろしいですか？")){
-          localStorage.removeItem(CUSTOM_DATA_KEY);
+          localStorage.removeItem(customDataKey());
           initData().then(renderHome);
         }
       }}, ["同梱データに戻す"])
@@ -906,15 +984,15 @@ function importProgress(){
 }
 
 function exportQuestions(){
-  const d = localStorage.getItem(CUSTOM_DATA_KEY) || JSON.stringify(DATA);
-  downloadText(`neuro_questions_v${APP_VERSION}.json`, d);
+  const d = localStorage.getItem(customDataKey()) || JSON.stringify(DATA);
+  downloadText(`${ACTIVE_DECK?.id || DEFAULT_DECK_ID}_questions_v${APP_VERSION}.json`, d);
 }
 function importQuestions(){
   pickFile(".json", async (txt) => {
     try{
       const obj = JSON.parse(txt);
       if(!obj.questions || !Array.isArray(obj.questions)) throw new Error("bad");
-      localStorage.setItem(CUSTOM_DATA_KEY, JSON.stringify(obj));
+      localStorage.setItem(customDataKey(), JSON.stringify(obj));
       alert("問題データを上書きしました。");
       await initData();
       renderHome();
@@ -1226,7 +1304,19 @@ function renderTopicSelect(){
 function normalizeAnswer(arr){
   return (arr||[]).slice().sort().join("");
 }
+function normalizeShortAnswer(input){
+  return String(input ?? "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/[\s\u3000]+/g, "")
+    .toLowerCase();
+}
 function isCorrect(q, selectedLetters){
+  if(q.type === "short"){
+    const userInput = Array.isArray(selectedLetters) ? selectedLetters.join("") : selectedLetters;
+    const normalized = normalizeShortAnswer(userInput);
+    return (q.answer || []).some(ans => normalizeShortAnswer(ans) === normalized);
+  }
   return normalizeAnswer(q.answer) === normalizeAnswer(selectedLetters);
 }
 function getSelectedFromForm(form, qtype){
@@ -1428,19 +1518,27 @@ function renderQuiz(session){
   const prog = el("div", {class:"progress"}, [el("div", {style:`width:${progressPct}%`}, [])]);
 
   const form = el("form", {}, []);
+  const isShort = q.type === "short";
   const optType = q.type === "multi" ? "checkbox" : "radio";
 
   const prevSel = session.answers[q.id]?.selected || [];
+  const prevText = session.answers[q.id]?.text || "";
+  let shortInput = null;
 
-  ["A","B","C","D","E"].forEach(k => {
-    const checked = prevSel.includes(k);
-    const inputId = `${q.id}_${k}`;
-    form.appendChild(el("label", {class:"option", for: inputId}, [
-      el("input", {type: optType, name:"opt", value:k, id: inputId, ...(checked?{checked:"checked"}:{})}),
-      el("div", {class:"option__key"}, [k]),
-      el("div", {class:"option__label"}, [q.options[k] || ""])
-    ]));
-  });
+  if(isShort){
+    shortInput = el("input", {type:"text", placeholder:"回答を入力", value: prevText});
+    form.appendChild(shortInput);
+  }else{
+    ["A","B","C","D","E"].forEach(k => {
+      const checked = prevSel.includes(k);
+      const inputId = `${q.id}_${k}`;
+      form.appendChild(el("label", {class:"option", for: inputId}, [
+        el("input", {type: optType, name:"opt", value:k, id: inputId, ...(checked?{checked:"checked"}:{})}),
+        el("div", {class:"option__key"}, [k]),
+        el("div", {class:"option__label"}, [q.options[k] || ""])
+      ]));
+    });
+  }
 
   const resultBox = el("div", {class:"card", style:"display:none"}, []);
   let graded = false;
@@ -1467,29 +1565,7 @@ function renderQuiz(session){
     goNext();
   }
 
-  function showResult(selected){
-    const ok = isCorrect(q, selected);
-    const p = loadProgress();
-    const card = getOrCreateCard(p, q.id);
-    incrementStats(card, ok);
-    saveProgress(p);
-
-    session.answers[q.id] = {selected, ok};
-
-    const ansStr = q.answer.join("");
-    const selStr = selected.join("");
-
-    resultBox.style.display = "block";
-    resultBox.innerHTML = "";
-    resultBox.appendChild(el("div", {class:"h2"}, [ ok ? "✅ 正解" : "❌ 不正解" ]));
-    resultBox.appendChild(el("div", {class:"p"}, [
-      `あなたの回答: ${selStr || "(未選択)"}\n正解: ${ansStr}`
-    ]));
-    if(q.explanation){
-      resultBox.appendChild(el("div", {class:"hr"}, []));
-      resultBox.appendChild(el("div", {class:"small"}, ["解説"]));
-      resultBox.appendChild(el("div", {class:"p"}, [q.explanation]));
-    }
+  function appendResultControls(ok){
     const controls = el("div", {class:"sr-controls"}, []);
     const reasonLabel = el("label", {class:"small"}, ["誤答理由（任意）"]);
     const reasonSel = el("select", {}, [el("option", {value:""}, ["選択してください"]), ...SR_REASON_OPTIONS.map(r=> el("option", {value:r}, [r]))]);
@@ -1514,15 +1590,72 @@ function renderQuiz(session){
     controls.appendChild(el("div", {class:"small"}, ["※評価すると自動で次の問題へ進みます"]));
     controls.appendChild(gradeRow);
 
-    const nextBtn = el("button", {class:"btn btn--muted", type:"button", onClick: goNext}, [session.idx < total-1 ? "次へ" : "ホームへ"]);
-
     resultBox.appendChild(el("div", {class:"hr"}, []));
     resultBox.appendChild(controls);
     resultBox.appendChild(el("div", {class:"hr"}, []));
+  }
+
+  function showResultSelected(selected){
+    const ok = isCorrect(q, selected);
+    const p = loadProgress();
+    const card = getOrCreateCard(p, q.id);
+    incrementStats(card, ok);
+    saveProgress(p);
+
+    session.answers[q.id] = {selected, ok};
+
+    const ansStr = q.answer.join("");
+    const selStr = selected.join("");
+
+    resultBox.style.display = "block";
+    resultBox.innerHTML = "";
+    resultBox.appendChild(el("div", {class:"h2"}, [ ok ? "✅ 正解" : "❌ 不正解" ]));
+    resultBox.appendChild(el("div", {class:"p"}, [
+      `あなたの回答: ${selStr || "(未選択)"}\n正解: ${ansStr}`
+    ]));
+    if(q.explanation){
+      resultBox.appendChild(el("div", {class:"hr"}, []));
+      resultBox.appendChild(el("div", {class:"small"}, ["解説"]));
+      resultBox.appendChild(el("div", {class:"p"}, [q.explanation]));
+    }
+    appendResultControls(ok);
+
+    const nextBtn = el("button", {class:"btn btn--muted", type:"button", onClick: goNext}, [session.idx < total-1 ? "次へ" : "ホームへ"]);
+
     resultBox.appendChild(nextBtn);
   }
 
-  const submitBtn = el("button", {class:"btn", type:"submit"}, ["採点する"]);
+  function showResultShort(inputText){
+    const ok = isCorrect(q, inputText);
+    const p = loadProgress();
+    const card = getOrCreateCard(p, q.id);
+    incrementStats(card, ok);
+    saveProgress(p);
+
+    session.answers[q.id] = {text: inputText, ok};
+
+    const representative = (q.answer || [])[0] || "";
+    const userText = inputText || "(未入力)";
+
+    resultBox.style.display = "block";
+    resultBox.innerHTML = "";
+    resultBox.appendChild(el("div", {class:"h2"}, [ ok ? "✅ 正解" : "❌ 不正解" ]));
+    resultBox.appendChild(el("div", {class:"p"}, [
+      `あなたの回答: ${userText}\n正解（代表）: ${representative}`
+    ]));
+    if(q.explanation){
+      resultBox.appendChild(el("div", {class:"hr"}, []));
+      resultBox.appendChild(el("div", {class:"small"}, ["解説"]));
+      resultBox.appendChild(el("div", {class:"p"}, [q.explanation]));
+    }
+    appendResultControls(ok);
+
+    const nextBtn = el("button", {class:"btn btn--muted", type:"button", onClick: goNext}, [session.idx < total-1 ? "次へ" : "ホームへ"]);
+
+    resultBox.appendChild(nextBtn);
+  }
+
+  const submitBtn = el("button", {class:"btn", type:"submit"}, [isShort ? "判定する" : "採点する"]);
   const backBtn = el("button", {class:"btn btn--muted", type:"button", onClick: ()=> {
     if(session.idx>0){
       session.idx -= 1;
@@ -1536,9 +1669,15 @@ function renderQuiz(session){
 
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
-    const selected = getSelectedFromForm(form, q.type);
-    session.answers[q.id] = {selected};
-    showResult(selected);
+    if(isShort){
+      const inputText = shortInput ? shortInput.value : "";
+      session.answers[q.id] = {text: inputText};
+      showResultShort(inputText);
+    }else{
+      const selected = getSelectedFromForm(form, q.type);
+      session.answers[q.id] = {selected};
+      showResultSelected(selected);
+    }
   });
 
   const title = session.mode === "review" ? "クイズ（復習）" : (session.mode === "mockReview" ? "クイズ（模試ベース復習）" : "クイズ（練習）");
@@ -1556,17 +1695,21 @@ function renderQuiz(session){
 /* -------- Mock test (90 min, 100 Q) -------- */
 function loadOngoingTest(){
   try{
-    return JSON.parse(localStorage.getItem(ONGOING_TEST_KEY) || "null");
+    return JSON.parse(localStorage.getItem(ongoingTestKey()) || "null");
   }catch(e){ return null; }
 }
 function saveOngoingTest(t){
-  localStorage.setItem(ONGOING_TEST_KEY, JSON.stringify(t));
+  localStorage.setItem(ongoingTestKey(), JSON.stringify(t));
 }
 function clearOngoingTest(){
-  localStorage.removeItem(ONGOING_TEST_KEY);
+  localStorage.removeItem(ongoingTestKey());
 }
 
 function startMockTest(){
+  if(deckHasShort()){
+    alert("短答問題が含まれているため、このデッキでは模擬テストを利用できません。");
+    return;
+  }
   const existing = loadOngoingTest();
   if(existing && existing.mode==="mock" && existing.ids && confirm("途中保存の模擬テストがあります。再開しますか？")){
     renderMock(existing);
@@ -1753,21 +1896,76 @@ function finishMock(test){
   mount(stNode);
 }
 
+function deckHasShort(){
+  return QUESTIONS.some(q => q.type === "short");
+}
+
 /* -------- Init -------- */
+async function loadDecks(){
+  const deckUrl = new URL("./data/decks.json", location.href);
+  const res = await fetch(deckUrl.toString(), {cache:"no-store"});
+  const list = await res.json();
+  if(!Array.isArray(list)) throw new Error("decks.json must be array");
+  return list.filter(d => d && typeof d.id === "string" && typeof d.path === "string");
+}
+
+function ensureDeckDefaults(list){
+  const decks = Array.isArray(list) ? list.slice() : [];
+  if(!decks.some(d => d.id === DEFAULT_DECK_ID)){
+    decks.unshift({id: DEFAULT_DECK_ID, label:"神経解剖", path:"./data/questions.json"});
+  }
+  return decks;
+}
+
+function renderDeckSelect(){
+  const sel = document.getElementById("deckSelect");
+  if(!sel) return;
+  sel.innerHTML = "";
+  DECKS.forEach(deck => {
+    const opt = document.createElement("option");
+    opt.value = deck.id;
+    opt.textContent = deck.label || deck.id;
+    sel.appendChild(opt);
+  });
+  sel.value = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+  sel.onchange = async () => {
+    setActiveDeck(sel.value);
+    PROGRESS_CACHE = null;
+    DATA = null;
+    QUESTIONS = [];
+    INDEX = {};
+    await initData();
+    renderHome();
+  };
+}
+
+async function initDecks(){
+  try{
+    DECKS = ensureDeckDefaults(await loadDecks());
+  }catch(e){
+    DECKS = ensureDeckDefaults([]);
+  }
+  setActiveDeck(getStoredDeckId());
+  renderDeckSelect();
+}
+
 async function initData(){
+  ensureDeckStorageMigration();
   // custom override
-  const custom = localStorage.getItem(CUSTOM_DATA_KEY);
+  const custom = localStorage.getItem(customDataKey());
   if(custom){
     try{ DATA = JSON.parse(custom); }catch(e){ DATA = null; }
   }
   if(!DATA){
-    const dataUrl = new URL("./data/questions.json", location.href);
+    const dataPath = ACTIVE_DECK?.path || "./data/questions.json";
+    const dataUrl = new URL(dataPath, location.href);
     const res = await fetch(dataUrl.toString(), {cache:"no-store"});
     DATA = await res.json();
   }
   QUESTIONS = DATA.questions || [];
   INDEX = {};
   ensureQuestionTags();
+  validateQuestions(QUESTIONS);
   QUESTIONS.forEach(q => { INDEX[q.id] = q; });
 }
 
@@ -1790,8 +1988,12 @@ document.getElementById("navStats").addEventListener("click", renderStats);
 document.getElementById("navData").addEventListener("click", renderData);
 document.getElementById("navImport").addEventListener("click", renderMockImport);
 
-initData().then(() => {
+async function initApp(){
+  await initDecks();
+  await initData();
   loadProgress(); // ensure migration
   renderHome();
   registerSW();
-});
+}
+
+initApp();

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "source": "forensics_v1",
+  "questions": [
+    {
+      "id": "FQ001",
+      "type": "short",
+      "type_raw": "短答",
+      "stem": "【異状死体】医師法21条：何時間以内に届け出？",
+      "options": {},
+      "answer": ["24", "24時間", "24時間以内"],
+      "explanation": "医師法21条では異状死体を24時間以内に届け出る必要があります。",
+      "tag": "異状死体",
+      "topic": "法医学"
+    }
+  ]
+}

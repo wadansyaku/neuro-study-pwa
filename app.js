@@ -781,6 +781,12 @@ function renderData(){
     value: cfgRef.apiBase,
     onChange: (e) => { cfgRef.apiBase = e.target.value.trim(); }
   });
+  const userIdInput = el("input", {
+    type:"text",
+    placeholder:"ユーザーID（任意。英数字・-・_のみ）",
+    value: cfgRef.userId,
+    onChange: (e) => { cfgRef.userId = e.target.value.trim(); }
+  });
 
   const btnSaveCloud = el("button", {class:"btn btn--muted"}, ["設定を保存"]);
   const btnPull = el("button", {class:"btn btn--muted"}, ["クラウドから取得"]);
@@ -803,8 +809,12 @@ function renderData(){
   }
 
   btnSaveCloud.addEventListener("click", () => {
-    saveCloudConfig(cfgRef);
-    setCloudMessage("クラウド設定を保存しました。", "ok");
+    try{
+      saveCloudConfig(cfgRef);
+      setCloudMessage("クラウド設定を保存しました。", "ok");
+    }catch(e){
+      setCloudMessage(e.message || "クラウド設定の保存に失敗しました。", "warn");
+    }
   });
 
   async function handlePull(){
@@ -936,6 +946,10 @@ function renderData(){
       el("div", {class:"cloud-grid__item"}, [
         el("div", {class:"small"}, ["APIベースURL（任意。省略時はこのサイトの /api を使用）"]),
         endpointInput
+      ]),
+      el("div", {class:"cloud-grid__item"}, [
+        el("div", {class:"small"}, ["ユーザーID（任意。英数字・-・_のみ / 64文字以内）"]),
+        userIdInput
       ])
     ]),
     el("div", {class:"row"}, [
@@ -1198,16 +1212,29 @@ function loadCloudConfig(){
   return {
     apiBase: cfg.apiBase || legacy.url || "",
     token: resolvedToken,
-    rememberToken
+    rememberToken,
+    userId: cfg.userId || ""
   };
+}
+
+function normalizeUserId(raw){
+  const trimmed = (raw || "").trim();
+  if(!trimmed) return "";
+  if(!/^[a-zA-Z0-9_-]{1,64}$/.test(trimmed)) return null;
+  return trimmed;
 }
 
 function saveCloudConfig(cfg){
   const rememberToken = !!cfg.rememberToken;
+  const normalizedUserId = normalizeUserId(cfg.userId);
+  if(normalizedUserId === null){
+    throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
+  }
   localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify({
     apiBase: cfg.apiBase || "",
     token: rememberToken ? (cfg.token || "") : "",
-    rememberToken
+    rememberToken,
+    userId: normalizedUserId || ""
   }));
   if(rememberToken){
     sessionStorage.removeItem(CLOUD_SESSION_TOKEN_KEY);
@@ -1234,14 +1261,25 @@ function saveCloudStatus(st){
 
 function buildApiUrl(cfg, path){
   const base = (cfg && cfg.apiBase) ? cfg.apiBase : "";
+  let resolved = path;
   try{
     if(base){
-      return new URL(path, base).toString();
+      resolved = new URL(path, base).toString();
     }
   }catch(e){
     // fallback
   }
-  return path;
+  const userId = normalizeUserId(cfg?.userId);
+  if(userId){
+    try{
+      const withUser = new URL(resolved, location.href);
+      withUser.searchParams.set("user", userId);
+      return withUser.toString();
+    }catch(e){
+      return resolved;
+    }
+  }
+  return resolved;
 }
 
 class CloudConflictError extends Error{
@@ -1252,6 +1290,10 @@ class CloudConflictError extends Error{
 }
 
 async function fetchCloudState(cfg){
+  const normalizedUserId = normalizeUserId(cfg?.userId);
+  if(normalizedUserId === null){
+    throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
+  }
   const url = buildApiUrl(cfg, "/api/state");
   const headers = {
     "Accept": "application/json",
@@ -1273,6 +1315,10 @@ async function fetchCloudState(cfg){
 }
 
 async function pushCloudState(cfg, meta, options={}){
+  const normalizedUserId = normalizeUserId(cfg?.userId);
+  if(normalizedUserId === null){
+    throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
+  }
   const url = buildApiUrl(cfg, "/api/state");
   const headers = {
     "Content-Type": "application/json",

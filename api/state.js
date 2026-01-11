@@ -1,7 +1,7 @@
 import { sql } from "@vercel/postgres";
 import { timingSafeEqual } from "crypto";
 
-const ROW_ID = "default";
+const DEFAULT_ROW_ID = "default";
 let didEnsureTable = false;
 
 function parseAllowedOrigins(){
@@ -83,8 +83,22 @@ async function ensureTableOnce(){
   didEnsureTable = true;
 }
 
-async function fetchCurrentState(){
-  const {rows} = await sql`SELECT state_json, version, updated_at FROM user_state WHERE id = ${ROW_ID} LIMIT 1;`;
+function resolveRowId(req){
+  try{
+    const url = new URL(req.url, `http://${req.headers?.host || "localhost"}`);
+    const raw = url.searchParams.get("user");
+    if(!raw) return DEFAULT_ROW_ID;
+    const trimmed = raw.trim();
+    if(!trimmed) return DEFAULT_ROW_ID;
+    if(!/^[a-zA-Z0-9_-]{1,64}$/.test(trimmed)) return null;
+    return trimmed;
+  }catch(e){
+    return DEFAULT_ROW_ID;
+  }
+}
+
+async function fetchCurrentState(rowId){
+  const {rows} = await sql`SELECT state_json, version, updated_at FROM user_state WHERE id = ${rowId} LIMIT 1;`;
   const row = rows[0];
   if(!row) return null;
   return {
@@ -94,10 +108,10 @@ async function fetchCurrentState(){
   };
 }
 
-async function saveState(state, baseVersion){
+async function saveState(rowId, state, baseVersion){
   const nextVersion = (baseVersion ?? 0) + 1;
   await sql`INSERT INTO user_state (id, state_json, version)
-    VALUES (${ROW_ID}, ${state}, ${nextVersion})
+    VALUES (${rowId}, ${state}, ${nextVersion})
     ON CONFLICT (id)
     DO UPDATE SET state_json = EXCLUDED.state_json, version = EXCLUDED.version, updated_at = now();`;
   return {
@@ -106,9 +120,9 @@ async function saveState(state, baseVersion){
   };
 }
 
-async function insertInitialState(state){
+async function insertInitialState(rowId, state){
   const {rows} = await sql`INSERT INTO user_state (id, state_json, version)
-    VALUES (${ROW_ID}, ${state}, 1)
+    VALUES (${rowId}, ${state}, 1)
     ON CONFLICT (id)
     DO NOTHING
     RETURNING version, updated_at;`;
@@ -120,11 +134,11 @@ async function insertInitialState(state){
   };
 }
 
-async function updateStateIfVersionMatch(state, baseVersion){
+async function updateStateIfVersionMatch(rowId, state, baseVersion){
   if(baseVersion === null || baseVersion === undefined) return null;
   const {rows} = await sql`UPDATE user_state
     SET state_json = ${state}, version = version + 1, updated_at = now()
-    WHERE id = ${ROW_ID} AND version = ${baseVersion}
+    WHERE id = ${rowId} AND version = ${baseVersion}
     RETURNING version, updated_at;`;
   const row = rows[0];
   if(!row) return null;
@@ -159,11 +173,15 @@ export default async function handler(req, res){
   if(!isTokenValid(incomingToken, process.env.SYNC_TOKEN)){
     return sendJson(req, res, 401, {error: "Unauthorized"});
   }
+  const rowId = resolveRowId(req);
+  if(!rowId){
+    return sendJson(req, res, 400, {error: "Invalid user id"});
+  }
 
   try{
     await ensureTableOnce();
     if(req.method === "GET"){
-      const current = await fetchCurrentState();
+      const current = await fetchCurrentState(rowId);
       return sendJson(req, res, 200, current || {state:null, version:null, updatedAt:null});
     }
 
@@ -181,10 +199,10 @@ export default async function handler(req, res){
       return sendJson(req, res, 400, {error: "state must be a JSON object"});
     }
 
-    const existing = await fetchCurrentState();
+    const existing = await fetchCurrentState(rowId);
     const currentVersion = existing ? existing.version : null;
     if(force){
-      const result = await saveState(state, currentVersion);
+      const result = await saveState(rowId, state, currentVersion);
       return sendJson(req, res, 200, {...result, state});
     }
 
@@ -192,9 +210,9 @@ export default async function handler(req, res){
       if(baseVersion === null || baseVersion !== currentVersion){
         return sendJson(req, res, 409, existing);
       }
-      const updated = await updateStateIfVersionMatch(state, baseVersion);
+      const updated = await updateStateIfVersionMatch(rowId, state, baseVersion);
       if(!updated){
-        const latest = await fetchCurrentState();
+        const latest = await fetchCurrentState(rowId);
         return sendJson(req, res, 409, latest || {state:null, version:null, updatedAt:null});
       }
       return sendJson(req, res, 200, {...updated, state});
@@ -203,15 +221,15 @@ export default async function handler(req, res){
     if(baseVersion !== null && baseVersion !== 0){
       return sendJson(req, res, 409, {state:null, version:null, updatedAt:null});
     }
-    const inserted = await insertInitialState(state);
+    const inserted = await insertInitialState(rowId, state);
     if(inserted){
       return sendJson(req, res, 200, {...inserted, state});
     }
-    const updated = await updateStateIfVersionMatch(state, baseVersion ?? 0);
+    const updated = await updateStateIfVersionMatch(rowId, state, baseVersion ?? 0);
     if(updated){
       return sendJson(req, res, 200, {...updated, state});
     }
-    const latest = await fetchCurrentState();
+    const latest = await fetchCurrentState(rowId);
     return sendJson(req, res, 409, latest || {state:null, version:null, updatedAt:null});
   }catch(err){
     console.error(err);

@@ -113,6 +113,15 @@ GitHub Pages での手順は `GITHUB_PAGES_STEPS.md` も参照してください
    - Postgres の接続変数（`POSTGRES_URL` など）はIntegrationが自動付与
 4. 再デプロイすると `/api/health`・`/api/state` が使えます（Service Worker / manifest は vercel.json で no-store ヘッダー）
 
+## DBマイグレーション
+新しい DB スキーマは `migrations/` で管理します。ローカルまたはVercelの環境変数（`POSTGRES_URL` など）が設定されている状態で以下を実行します。
+
+```bash
+npm run migrate
+```
+
+設計の詳細は `docs/architecture.md` を参照してください。
+
 ### DBスキーマ（自動作成）
 Functions 側で初回アクセス時に `user_state` テーブルを作成します。
 

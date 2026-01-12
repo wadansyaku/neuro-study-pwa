@@ -1,7 +1,7 @@
 # 神経解剖学 学習Webアプリ（PWA）
 
 このフォルダは **スマホで学習できる簡単なWebアプリ** です（オフライン対応）。
-同梱の questions.json（100問）で、クイズ練習と「90分100問」の模擬テストができます。
+問題データは Postgres に取り込み、クイズ練習と「90分100問」の模擬テストができます。
 デッキ切替により、神経解剖と法医学など複数の問題セットを選べます。
 新しく spaced repetition（Anki風）と「今日の復習」キュー、誤答理由メモを追加し、学習効率を高めました。
 
@@ -22,6 +22,10 @@
 3) Settings → Pages → Branchをmain / root に設定  
 4) 数分後に表示されるURLをスマホで開き「ホーム画面に追加」
 
+### 初期設定（DB利用時）
+1) Vercel で `SYNC_TOKEN` を設定する  
+2) アプリの「データ」タブで API トークンとユーザーIDを入力する
+
 ## 機能
 - クイック練習（10問）
 - 未学習優先練習（未解答の問題を優先して10問出題）
@@ -32,13 +36,13 @@
 - 進捗表示（正答率・間違い上位・理由ランキング・タグ別Due）
 - 解答後に Again/Hard/Good/Easy で間隔反復を更新
 - 誤答理由（固定候補）と短いメモを記録可能
-- 学習履歴のJSON書き出し/読み込み（v1→v3へ自動移行）
-- 問題データJSONの差し替え（端末内）
+- 学習履歴のJSON書き出し/読み込み（DB基準）
+- 問題データのJSON書き出し（DB）
 - デッキ切替（複数の問題セットを選択）
 - 短答（穴埋め）問題タイプ
 
 ## 注意
-- 学習履歴は端末内に保存されます。端末を変える場合は「学習履歴を書き出す」で移行してください。
+- 学習履歴は DB に保存されます。端末を変えても同一ユーザーIDで復元できます。
 
 ## デッキ追加方法
 1. `data/decks.json` にデッキ定義を追加する  
@@ -50,7 +54,8 @@
    ]
    ```
 2. `path` で指定した JSON を配置する（相対パス推奨）
-3. アプリ起動後、画面上部のデッキ選択で切り替えられます
+3. `npm run seed` で DB に取り込み
+4. アプリ起動後、画面上部のデッキ選択で切り替えられます
 
 ## 問題データのフォーマット
 共通フィールド: `id`, `type`, `type_raw`, `stem`, `answer`, `explanation`, `tag`, `topic`
@@ -86,9 +91,9 @@
 ```
 
 ## 進捗データ（v3）と移行
-- localStorage キー: `neuroStudyProgressV2_<deckId>`（スキーマは v3）
-- 旧バージョン（v1）のデータは初回起動時に自動で v3 へ移行します（正答/誤答の累積と最終解答日時を引き継ぎ、SRは今日からスタート）。
-- エクスポート/インポートは v3 スキーマを含む JSON です。破損データは読み込み時にエラーメッセージを表示します。
+- 進捗は DB に保存されます（DB が唯一の正）。
+- 旧 localStorage データは「データ」タブからワンクリックで移行できます。
+- エクスポート/インポートは v3 スキーマを含む JSON です。
 
 ## デプロイ（Vercel GUIで最短）
 ビルド不要の静的ホスティングで動きます。GitHub Pages / Vercel の両方で相対パス動作を確認するため、manifest / SW / decks.json / questions.json の参照は相対URLにしています。
@@ -111,7 +116,8 @@ GitHub Pages での手順は `GITHUB_PAGES_STEPS.md` も参照してください
    - `SYNC_TOKEN`: 任意の長い文字列（Bearerトークンとして使用）  
    - `SYNC_ALLOWED_ORIGINS`: CORS許可オリジン（カンマ区切り）。未設定なら同一オリジンのみ許可  
    - Postgres の接続変数（`POSTGRES_URL` など）はIntegrationが自動付与
-4. 再デプロイすると `/api/health`・`/api/state` が使えます（Service Worker / manifest は vercel.json で no-store ヘッダー）
+4. `npm run migrate` と `npm run seed` を実行して DB を準備する
+5. 再デプロイすると `/api/health` を含む API が使えます（Service Worker / manifest は vercel.json で no-store ヘッダー）
 
 ## DBマイグレーション
 新しい DB スキーマは `migrations/` で管理します。ローカルまたはVercelの環境変数（`POSTGRES_URL` など）が設定されている状態で以下を実行します。
@@ -120,41 +126,29 @@ GitHub Pages での手順は `GITHUB_PAGES_STEPS.md` も参照してください
 npm run migrate
 ```
 
-設計の詳細は `docs/architecture.md` を参照してください。
+### 問題データの取り込み
 
-### DBスキーマ（自動作成）
-Functions 側で初回アクセス時に `user_state` テーブルを作成します。
-
-```sql
-CREATE TABLE IF NOT EXISTS user_state (
-  id text PRIMARY KEY,
-  state_json jsonb,
-  version bigint NOT NULL DEFAULT 0,
-  updated_at timestamptz NOT NULL DEFAULT now()
-);
+```bash
+npm run seed
 ```
 
-格納するデータは localStorage `neuroStudyProgressV2_<deckId>`（v3スキーマ）をそのまま JSON として保存し、`version` をインクリメントして衝突検知に使います。
+設計の詳細は `docs/architecture.md` を参照してください。
 
 ### API概要
 - `GET /api/health` : 200 / `{ok: true}`  
-- `GET /api/state` : `Authorization: Bearer <SYNC_TOKEN>` 必須  
-  - レスポンス: `{ state: <json|null>, version: <number|null>, updatedAt: <iso|null> }`
-- `PUT /api/state` : `Authorization: Bearer <SYNC_TOKEN>` 必須  
-  - リクエスト例: `{ state: <json>, baseVersion: <number|null>, force?: boolean }`  
-  - `baseVersion` がクラウド側の `version` と異なる場合、`409 Conflict` + 現在の `{state, version, updatedAt}` を返します  
-  - `force: true` で上書き可能（衝突警告はフロント側で表示）
+- `GET /api/decks`  
+- `GET /api/questions?deckId=...`  
+- `GET /api/review/today` / `weak` / `untouched` / `tag`  
+- `POST /api/attempts`  
+- `POST /api/test-sessions` / `GET /api/test-sessions?id=...`  
+- `GET /api/progress/summary`  
+- `POST /api/import/progress` / `GET /api/export/progress`  
 
-### クラウド同期の使い方（フロント UI）
-1. 画面上部「データ」タブ → 「クラウド同期」セクションを開く  
-2. **同期トークン** に `SYNC_TOKEN` を入力（マスク保存）。必要なら API ベースURLも設定（空なら同一ドメインの `/api` を使用）  
-3. 「設定を保存」→  
-   - 「クラウドから取得」: DBの progress v3 を localStorage に復元  
-   - 「クラウドへ送信」: localStorage の progress v3 を DB に保存（`baseVersion` 一致を確認）  
-   - 衝突時は警告 + 「クラウドを強制上書き」ボタンで明示的に上書き可能
-4. 最終同期時刻 / クラウド側の version を表示。同期に失敗しても学習機能はそのまま使えます（オフライン対応）。
+※ `/api/state` は旧同期機能として残っています（deprecated）。
 
 ### ローカル開発
 - 依存インストール: `npm install`
+- マイグレーション: `npm run migrate`
+- 問題データ投入: `npm run seed`
 - Vercel CLI で Functions をローカル実行する場合: `npm run dev`（`vercel` CLI 同梱）  
 - 静的ファイルは `python -m http.server 8000` などでも確認できます（APIは別途環境が必要）

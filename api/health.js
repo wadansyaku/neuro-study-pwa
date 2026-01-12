@@ -1,3 +1,5 @@
+import { sql } from "@vercel/postgres";
+
 function parseAllowedOrigins(){
   const raw = process.env.SYNC_ALLOWED_ORIGINS || "";
   return raw.split(",").map(v => v.trim()).filter(Boolean);
@@ -36,8 +38,15 @@ export default async function handler(req, res){
     res.end();
     return;
   }
-  res.statusCode = 200;
+  let dbOk = false;
+  try{
+    await sql`SELECT 1;`;
+    dbOk = true;
+  }catch(error){
+    dbOk = false;
+  }
+  res.statusCode = dbOk ? 200 : 500;
   res.setHeader("Content-Type", "application/json");
   res.setHeader("Cache-Control", "no-store");
-  res.end(JSON.stringify({ok: true, timestamp: new Date().toISOString()}));
+  res.end(JSON.stringify({ok: dbOk, timestamp: new Date().toISOString()}));
 }

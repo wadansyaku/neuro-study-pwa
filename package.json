@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vercel dev",
+    "migrate": "node scripts/migrate.js",
     "test": "echo \"No automated tests configured\""
   },
   "dependencies": {

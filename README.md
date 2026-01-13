@@ -23,7 +23,7 @@
 4) 数分後に表示されるURLをスマホで開き「ホーム画面に追加」
 
 ### 初期設定（DB利用時）
-1) Vercel で `SYNC_TOKEN` を設定する  
+1) APIホスト（Vercel Functions など）で `SYNC_TOKEN` を設定する  
 2) アプリの「データ」タブで API トークンとユーザーIDを入力する
 
 ## 機能
@@ -103,7 +103,31 @@
 - 旧 localStorage データは「データ」タブからワンクリックで移行できます。
 - エクスポート/インポートは v3 スキーマを含む JSON です。
 
-## デプロイ（Vercel GUIで最短）
+## Cloudflare Pages デプロイ（推奨）
+ビルド不要の静的ホスティングで動きます。Cloudflare Pages では `dist/` 出力を使う設定にしています（UIで `.` 指定が不安定な場合でも確実に動くため）。
+
+1. Cloudflare Pages → **Create a project** → GitHub 連携で本リポジトリを選択  
+2. Build設定
+   - Framework preset: **None**
+   - Build command: `npm ci && npm run build`
+   - Build output directory: `dist`
+3. main ブランチを Production としてデプロイ  
+4. デプロイ後、`https://<project>.pages.dev/` をスマホで開き「ホーム画面に追加」
+
+### キャッシュ制御（PWA更新対策）
+Cloudflare Pages では `_headers` を使って Service Worker とデータJSONのキャッシュを制御しています。
+
+```
+/sw.js      -> Cache-Control: no-store
+/index.html -> Cache-Control: no-cache
+/data/*     -> Cache-Control: no-cache
+```
+
+これにより「デプロイ後にリロードすれば最新の問題データが反映される」状態を狙っています。
+
+GitHub Pages での手順は `GITHUB_PAGES_STEPS.md` も参照してください。
+
+## Vercelデプロイ（APIが必要な場合）
 ビルド不要の静的ホスティングで動きます。GitHub Pages / Vercel の両方で相対パス動作を確認するため、manifest / SW / decks.json / questions.json の参照は相対URLにしています。
 
 1. GitHubでこのリポジトリを作成（またはFork）する  
@@ -111,8 +135,6 @@
 3. Framework Preset: **Other**（ビルド不要）、Root Directory: `/`、Build Command: なし（空）、Output: `/` のまま  
 4. Deploy を押すと数十秒で `https://<project>.vercel.app/` が発行されます  
 5. 初回アクセス時にオンラインで開いてインストール（ホーム画面追加）するとオフラインでも動作します
-
-GitHub Pages での手順は `GITHUB_PAGES_STEPS.md` も参照してください。
 
 ## Vercelデプロイ手順（静的配信 + /api Functions）
 1. このリポジトリを Vercel に Import  

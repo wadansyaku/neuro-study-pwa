@@ -1,4 +1,4 @@
-// Simple cache-first Service Worker
+// Simple offline-first Service Worker with network-first for mutable data
 const cacheSuffix = new URL(self.location).searchParams.get("v") || "v1";
 const CACHE_NAME = `neuro-study-pwa-${cacheSuffix}`;
 const BASE_URL = self.location;
@@ -36,17 +36,47 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(fetch(req));
     return;
   }
-  event.respondWith(
-    caches.match(req).then(cached => {
-      if(cached) return cached;
-      return fetch(req).then(res => {
-        // Optional: cache new GET requests
-        const copy = res.clone();
-        if(req.method === "GET"){
-          caches.open(CACHE_NAME).then(cache => cache.put(req, copy)).catch(()=>{});
-        }
-        return res;
-      }).catch(() => cached);
-    })
-  );
+  if(req.method !== "GET"){
+    event.respondWith(fetch(req));
+    return;
+  }
+
+  const isNavigation = req.mode === "navigate";
+  const isIndexHtml = url.pathname.endsWith("/index.html") || url.pathname === "/";
+  const isDataRequest = url.pathname.startsWith("/data/");
+
+  if(isNavigation || isIndexHtml || isDataRequest){
+    event.respondWith(networkFirst(req));
+    return;
+  }
+
+  event.respondWith(cacheFirst(req));
 });
+
+async function networkFirst(req){
+  try{
+    const res = await fetch(req);
+    if(res && res.ok){
+      const copy = res.clone();
+      caches.open(CACHE_NAME).then(cache => cache.put(req, copy)).catch(()=>{});
+    }
+    return res;
+  }catch(e){
+    return caches.match(req);
+  }
+}
+
+async function cacheFirst(req){
+  const cached = await caches.match(req);
+  if(cached) return cached;
+  try{
+    const res = await fetch(req);
+    if(res && res.ok){
+      const copy = res.clone();
+      caches.open(CACHE_NAME).then(cache => cache.put(req, copy)).catch(()=>{});
+    }
+    return res;
+  }catch(e){
+    return cached;
+  }
+}

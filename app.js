@@ -1,6 +1,6 @@
 /* 神経解剖学 学習Webアプリ - Vanilla JS / Offline-first */
 
-const APP_VERSION = 5;
+const APP_VERSION = 6;
 const PROGRESS_VERSION = 3;
 const DEFAULT_DECK_ID = "neuro";
 const DECK_SELECTION_KEY = "neuroStudySelectedDeck_v1";
@@ -738,7 +738,8 @@ function renderData(){
 
   const questionFileInput = el("input", {
     type: "file",
-    accept: "application/json",
+    accept: "application/json,.json",
+    required: "required",
     style: "display:none"
   });
   questionFileInput.addEventListener("change", async (e) => {
@@ -976,6 +977,10 @@ function validateImportedQuestions(list){
       return;
     }
     ids.add(q.id);
+    if(!q.stem || typeof q.stem !== "string"){
+      rejected.push({...base, reason: "stem missing"});
+      return;
+    }
 
     if(q.type === "short"){
       rejected.push({...base, reason: "short未対応"});
@@ -1003,6 +1008,17 @@ function validateImportedQuestions(list){
     accepted.push(normalized);
   });
   return {accepted, rejected};
+}
+
+function summarizeRejectedQuestions(rejected){
+  if(!rejected.length) return "";
+  const byReason = rejected.reduce((acc, cur) => {
+    acc[cur.reason] = (acc[cur.reason] || 0) + 1;
+    return acc;
+  }, {});
+  return Object.entries(byReason)
+    .map(([reason, count]) => `${reason}: ${count}件`)
+    .join(" / ");
 }
 
 function pickFile(accept, cb){
@@ -1061,23 +1077,22 @@ async function importQuestionsFromFile(file, {setImportMessage, refreshDataSumma
   console.log("[import] type counts", typeCounts);
 
   const {accepted, rejected} = validateImportedQuestions(rawQuestions);
+  const rejectedSummary = summarizeRejectedQuestions(rejected);
   if(rejected.length){
-    const byReason = rejected.reduce((acc, cur) => {
-      acc[cur.reason] = (acc[cur.reason] || 0) + 1;
-      return acc;
-    }, {});
-    console.log("[import] rejected summary", byReason);
+    console.log("[import] rejected summary", rejectedSummary);
     console.table(rejected);
   }
 
   if(accepted.length === 0){
-    setImportMessage("取り込める単一選択問題がありませんでした。shortは未対応です。", "warn");
+    const reasonNote = rejectedSummary ? `（除外理由: ${rejectedSummary}）` : "";
+    setImportMessage(`取り込める単一選択問題がありませんでした。shortは未対応です。${reasonNote}`, "warn");
     return;
   }
 
+  const importSource = parsed?.source || file.name || "import";
   const payload = {
     version: parsed?.version || 1,
-    source: parsed?.source || file.name || "import",
+    source: importSource,
     importedAt: nowISO(),
     questions: accepted
   };
@@ -1092,8 +1107,8 @@ async function importQuestionsFromFile(file, {setImportMessage, refreshDataSumma
   QUESTIONS.forEach(q => { INDEX[q.id] = q; });
   await resetStateAfterQuestionImport();
   refreshDataSummary();
-  const note = rejected.length ? `（除外: ${rejected.length}件）` : "";
-  setImportMessage(`問題データを読み込みました（${accepted.length}件）${note}`, "ok");
+  const note = rejected.length ? `（除外: ${rejected.length}件 / ${rejectedSummary}）` : "";
+  setImportMessage(`問題データを読み込みました（source: ${importSource} / ${accepted.length}件）${note}`, "ok");
 }
 
 function normalizeUserId(raw){

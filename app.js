@@ -1,10 +1,11 @@
 /* 神経解剖学 学習Webアプリ - Vanilla JS / Offline-first */
 
-const APP_VERSION = 4;
+const APP_VERSION = 5;
 const PROGRESS_VERSION = 3;
 const DEFAULT_DECK_ID = "neuro";
 const DECK_SELECTION_KEY = "neuroStudySelectedDeck_v1";
 const API_CONFIG_KEY = "neuroStudyApiConfig_v3";
+const IMPORTED_QUESTIONS_KEY_BASE = "neuroStudyImportedQuestions_v1";
 const LEGACY_PROGRESS_KEY_V2_BASE = "neuroStudyProgressV2";
 const LEGACY_PROGRESS_KEY_V1_BASE = "neuroStudyProgress_v1";
 const LEGACY_ONGOING_TEST_KEY_BASE = "neuroStudyOngoingTest_v1";
@@ -32,6 +33,10 @@ let CURRENT_VIEW = "init";
 
 function deckScopedKey(baseKey, deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID){
   return `${baseKey}_${deckId}`;
+}
+
+function questionsImportKey(deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID){
+  return `${IMPORTED_QUESTIONS_KEY_BASE}_${deckId}`;
 }
 
 function getStoredDeckId(){
@@ -709,6 +714,7 @@ function renderStats(){
 
 function renderData(){
   setCurrentView("data");
+  console.log("[view] renderData", {view: CURRENT_VIEW, path: location.pathname});
   const cfgRef = loadApiConfig();
   const importStatusNode = el("div", {class:"status status--muted", style:"display:none"}, []);
   const dataSummaryNode = el("div", {class:"small"}, []);
@@ -729,6 +735,28 @@ function renderData(){
     setNodeText(dataSummaryNode, `現在の総問題数: ${latestStats.total} / source: ${source}`);
   }
   refreshDataSummary();
+
+  const questionFileInput = el("input", {
+    type: "file",
+    accept: "application/json",
+    style: "display:none"
+  });
+  questionFileInput.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if(!file){
+      console.log("[import] file input canceled");
+      return;
+    }
+    try{
+      setImportMessage("問題データを読み込み中…", "muted");
+      await importQuestionsFromFile(file, {setImportMessage, refreshDataSummary});
+    }catch(err){
+      console.error("[import] question import failed", err);
+      setImportMessage(err?.message || "問題データの読み込みに失敗しました。", "warn");
+    }finally{
+      questionFileInput.value = "";
+    }
+  });
 
   const tokenInput = el("input", {
     type:"password",
@@ -803,8 +831,13 @@ function renderData(){
       }}, ["学習履歴をリセット"])
     ]),
     el("div", {class:"row"}, [
+      el("button", {class:"btn btn--muted", onClick: () => {
+        console.log("[import] questions button clicked", {view: CURRENT_VIEW});
+        questionFileInput.click();
+      }}, ["問題データを読み込む（JSON）"]),
       el("button", {class:"btn btn--muted", onClick: exportQuestions}, ["問題データを書き出す（JSON）"])
     ]),
+    questionFileInput,
     legacyMessage,
     legacyProgress ? btnLegacy : null,
     importStatusNode,
@@ -913,6 +946,65 @@ function exportQuestions(){
   downloadText(`${ACTIVE_DECK?.id || DEFAULT_DECK_ID}_questions_v${APP_VERSION}.json`, JSON.stringify(payload, null, 2));
 }
 
+function summarizeQuestionTypes(list){
+  const counts = {single: 0, short: 0, other: 0};
+  (list || []).forEach(q => {
+    if(q?.type === "single") counts.single += 1;
+    else if(q?.type === "short") counts.short += 1;
+    else counts.other += 1;
+  });
+  return counts;
+}
+
+function validateImportedQuestions(list){
+  const accepted = [];
+  const rejected = [];
+  const ids = new Set();
+
+  (list || []).forEach((q, idx) => {
+    const base = {id: q?.id || null, type: q?.type || null, index: idx + 1, reason: ""};
+    if(!q || typeof q !== "object"){
+      rejected.push({...base, reason: "invalid object"});
+      return;
+    }
+    if(!q.id || typeof q.id !== "string"){
+      rejected.push({...base, reason: "id missing"});
+      return;
+    }
+    if(ids.has(q.id)){
+      rejected.push({...base, reason: "id duplicated"});
+      return;
+    }
+    ids.add(q.id);
+
+    if(q.type === "short"){
+      rejected.push({...base, reason: "short未対応"});
+      return;
+    }
+    if(q.type !== "single"){
+      rejected.push({...base, reason: "type未対応"});
+      return;
+    }
+    if(!q.options || typeof q.options !== "object"){
+      rejected.push({...base, reason: "options missing"});
+      return;
+    }
+    const optionKeys = Object.keys(q.options || {});
+    const answers = Array.isArray(q.answer) ? q.answer : (typeof q.answer === "string" ? [q.answer] : []);
+    if(optionKeys.length === 0){
+      rejected.push({...base, reason: "options empty"});
+      return;
+    }
+    if(answers.length === 0 || answers.some(a => !optionKeys.includes(a))){
+      rejected.push({...base, reason: "answer invalid"});
+      return;
+    }
+    const normalized = {...q, answer: answers};
+    accepted.push(normalized);
+  });
+  return {accepted, rejected};
+}
+
 function pickFile(accept, cb){
   const input = document.createElement("input");
   input.type = "file";
@@ -924,6 +1016,84 @@ function pickFile(accept, cb){
     cb(txt);
   };
   input.click();
+}
+
+async function resetStateAfterQuestionImport(){
+  PROGRESS_CACHE = createEmptyProgress();
+  const cfg = loadApiConfig();
+  if(cfg.token && navigator.onLine){
+    try{
+      await resetProgress();
+      console.log("[import] progress reset via API", {deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID});
+    }catch(e){
+      console.warn("[import] progress reset failed", e);
+    }
+  }else{
+    console.log("[import] progress reset skipped (no token or offline)");
+  }
+}
+
+async function importQuestionsFromFile(file, {setImportMessage, refreshDataSummary}){
+  console.log("[import] file selected", {name: file.name, size: file.size, type: file.type});
+  let parsed;
+  try{
+    const text = await file.text();
+    parsed = JSON.parse(text);
+    console.log("[import] JSON.parse ok", {length: text.length});
+  }catch(e){
+    console.error("[import] JSON.parse failed", e);
+    setImportMessage("JSON形式が不正です。ファイルを確認してください。", "warn");
+    return;
+  }
+
+  const rawQuestions = Array.isArray(parsed?.questions) ? parsed.questions : (Array.isArray(parsed) ? parsed : null);
+  if(!rawQuestions){
+    setImportMessage("questions配列が見つかりません。JSONの構造を確認してください。", "warn");
+    return;
+  }
+
+  console.log("[import] payload summary", {
+    source: parsed?.source || file.name,
+    questions: rawQuestions.length
+  });
+
+  const typeCounts = summarizeQuestionTypes(rawQuestions);
+  console.log("[import] type counts", typeCounts);
+
+  const {accepted, rejected} = validateImportedQuestions(rawQuestions);
+  if(rejected.length){
+    const byReason = rejected.reduce((acc, cur) => {
+      acc[cur.reason] = (acc[cur.reason] || 0) + 1;
+      return acc;
+    }, {});
+    console.log("[import] rejected summary", byReason);
+    console.table(rejected);
+  }
+
+  if(accepted.length === 0){
+    setImportMessage("取り込める単一選択問題がありませんでした。shortは未対応です。", "warn");
+    return;
+  }
+
+  const payload = {
+    version: parsed?.version || 1,
+    source: parsed?.source || file.name || "import",
+    importedAt: nowISO(),
+    questions: accepted
+  };
+
+  const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+  saveImportedQuestions(deckId, payload);
+  DATA = {version: payload.version, source: payload.source, questions: accepted};
+  QUESTIONS = accepted;
+  INDEX = {};
+  ensureQuestionTags();
+  validateQuestions(QUESTIONS);
+  QUESTIONS.forEach(q => { INDEX[q.id] = q; });
+  await resetStateAfterQuestionImport();
+  refreshDataSummary();
+  const note = rejected.length ? `（除外: ${rejected.length}件）` : "";
+  setImportMessage(`問題データを読み込みました（${accepted.length}件）${note}`, "ok");
 }
 
 function normalizeUserId(raw){
@@ -952,6 +1122,18 @@ function saveApiConfig(cfg){
     token: cfg.token || "",
     userId: normalizedUserId || ""
   }));
+}
+
+function loadImportedQuestions(deckId){
+  const raw = localStorage.getItem(questionsImportKey(deckId));
+  if(!raw) return null;
+  const parsed = safeJsonParse(raw, null);
+  if(!parsed || !Array.isArray(parsed.questions)) return null;
+  return parsed;
+}
+
+function saveImportedQuestions(deckId, payload){
+  localStorage.setItem(questionsImportKey(deckId), JSON.stringify(payload));
 }
 
 function buildApiUrl(cfg, path){
@@ -1957,9 +2139,16 @@ async function initDecks(){
 
 async function initData(){
   const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
-  const questions = await fetchQuestionsPaged(deckId);
-  DATA = {version: 1, source: "db", questions};
-  QUESTIONS = questions;
+  const imported = loadImportedQuestions(deckId);
+  if(imported && Array.isArray(imported.questions) && imported.questions.length > 0){
+    console.log("[data] using imported questions", {deckId, count: imported.questions.length});
+    DATA = {version: imported.version || 1, source: imported.source || "import", questions: imported.questions};
+    QUESTIONS = imported.questions;
+  }else{
+    const questions = await fetchQuestionsPaged(deckId);
+    DATA = {version: 1, source: "db", questions};
+    QUESTIONS = questions;
+  }
   INDEX = {};
   ensureQuestionTags();
   validateQuestions(QUESTIONS);

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vercel dev",
     "migrate": "node scripts/migrate.js",
-    "test": "echo \"No automated tests configured\""
+    "seed": "node scripts/seed.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@vercel/postgres": "^0.10.0"

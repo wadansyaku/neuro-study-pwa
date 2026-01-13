@@ -4,15 +4,11 @@ const APP_VERSION = 4;
 const PROGRESS_VERSION = 3;
 const DEFAULT_DECK_ID = "neuro";
 const DECK_SELECTION_KEY = "neuroStudySelectedDeck_v1";
-const PROGRESS_KEY_V2_BASE = "neuroStudyProgressV2";
-const PROGRESS_KEY_V1_BASE = "neuroStudyProgress_v1";
-const ONGOING_TEST_KEY_BASE = "neuroStudyOngoingTest_v1";
-const CUSTOM_DATA_KEY_BASE = "neuroStudyCustomData_v1"; // optional override
-const CLOUD_CONFIG_KEY = "neuroStudyCloudConfig_v2"; // cloud sync endpoint/token
-const CLOUD_STATUS_KEY = "neuroStudyCloudStatus_v1"; // last sync metadata
-const CLOUD_SESSION_TOKEN_KEY = "neuroStudyCloudToken_session";
+const API_CONFIG_KEY = "neuroStudyApiConfig_v3";
+const LEGACY_PROGRESS_KEY_V2_BASE = "neuroStudyProgressV2";
+const LEGACY_PROGRESS_KEY_V1_BASE = "neuroStudyProgress_v1";
+const LEGACY_ONGOING_TEST_KEY_BASE = "neuroStudyOngoingTest_v1";
 
-let PROGRESS_CORRUPT_INFO = null;
 
 const SR_REASON_OPTIONS = [
   "知識不足",
@@ -44,35 +40,13 @@ function getStoredDeckId(){
 
 function setActiveDeck(deckId){
   const next = DECKS.find(d => d.id === deckId) || DECKS[0];
-  ACTIVE_DECK = next || {id: DEFAULT_DECK_ID, label:"神経解剖", path:"./data/questions.json"};
+  ACTIVE_DECK = next || {id: DEFAULT_DECK_ID, label:"神経解剖"};
   localStorage.setItem(DECK_SELECTION_KEY, ACTIVE_DECK.id);
 }
 
-function ensureDeckStorageMigration(){
-  if((ACTIVE_DECK?.id || DEFAULT_DECK_ID) !== DEFAULT_DECK_ID) return;
-  const scopedV2 = deckScopedKey(PROGRESS_KEY_V2_BASE, DEFAULT_DECK_ID);
-  const scopedV1 = deckScopedKey(PROGRESS_KEY_V1_BASE, DEFAULT_DECK_ID);
-  const scopedOngoing = deckScopedKey(ONGOING_TEST_KEY_BASE, DEFAULT_DECK_ID);
-  const scopedCustom = deckScopedKey(CUSTOM_DATA_KEY_BASE, DEFAULT_DECK_ID);
-
-  if(!localStorage.getItem(scopedV2) && localStorage.getItem(PROGRESS_KEY_V2_BASE)){
-    localStorage.setItem(scopedV2, localStorage.getItem(PROGRESS_KEY_V2_BASE));
-  }
-  if(!localStorage.getItem(scopedV1) && localStorage.getItem(PROGRESS_KEY_V1_BASE)){
-    localStorage.setItem(scopedV1, localStorage.getItem(PROGRESS_KEY_V1_BASE));
-  }
-  if(!localStorage.getItem(scopedOngoing) && localStorage.getItem(ONGOING_TEST_KEY_BASE)){
-    localStorage.setItem(scopedOngoing, localStorage.getItem(ONGOING_TEST_KEY_BASE));
-  }
-  if(!localStorage.getItem(scopedCustom) && localStorage.getItem(CUSTOM_DATA_KEY_BASE)){
-    localStorage.setItem(scopedCustom, localStorage.getItem(CUSTOM_DATA_KEY_BASE));
-  }
-}
-
-function progressKeyV2(){ return deckScopedKey(PROGRESS_KEY_V2_BASE); }
-function progressKeyV1(){ return deckScopedKey(PROGRESS_KEY_V1_BASE); }
-function ongoingTestKey(){ return deckScopedKey(ONGOING_TEST_KEY_BASE); }
-function customDataKey(){ return deckScopedKey(CUSTOM_DATA_KEY_BASE); }
+function legacyProgressKeyV2(){ return deckScopedKey(LEGACY_PROGRESS_KEY_V2_BASE); }
+function legacyProgressKeyV1(){ return deckScopedKey(LEGACY_PROGRESS_KEY_V1_BASE); }
+function legacyOngoingTestKey(){ return deckScopedKey(LEGACY_ONGOING_TEST_KEY_BASE); }
 
 /* -------- Utils -------- */
 function nowISO(){ return new Date().toISOString(); }
@@ -193,59 +167,44 @@ function normalizeProgress(p){
   return out;
 }
 
-function loadProgressStored(){
-  const raw = localStorage.getItem(progressKeyV2());
-  if(!raw) return null;
-  try{
-    const obj = JSON.parse(raw);
-    if(obj && obj.version >= 2){
-      return normalizeProgress(obj);
+function readLegacyProgress(){
+  const rawV2 = localStorage.getItem(legacyProgressKeyV2());
+  if(rawV2){
+    const parsed = safeJsonParse(rawV2, null);
+    return parsed ? normalizeProgress(parsed) : null;
+  }
+  const rawV1 = safeJsonParse(localStorage.getItem(legacyProgressKeyV1()), {});
+  if(rawV1 && typeof rawV1 === "object" && Object.keys(rawV1).length){
+    const p = createEmptyProgress();
+    const now = nowMs();
+    for(const [id, v] of Object.entries(rawV1)){
+      const card = normalizeCard(v);
+      card.seen = v.attempts || v.seen || 0;
+      card.correct = v.correct || 0;
+      card.wrong = v.wrong || 0;
+      const ts = v.lastAttempt ? Date.parse(v.lastAttempt) : null;
+      card.lastSeenAt = isFinite(ts) ? ts : null;
+      card.lastAnsweredAt = card.lastSeenAt;
+      card.sr = {...defaultSr(), dueAt: now};
+      card.mistake = defaultMistake();
+      p.cards[id] = card;
     }
-  }catch(e){
-    PROGRESS_CORRUPT_INFO = {
-      detectedAt: nowISO(),
-      rawLength: raw.length
-    };
-    localStorage.setItem(`${progressKeyV2()}_corrupt_backup`, raw);
-    localStorage.setItem(`${progressKeyV2()}_corrupt_at`, JSON.stringify(PROGRESS_CORRUPT_INFO.detectedAt));
-    localStorage.removeItem(progressKeyV2());
+    return p;
   }
   return null;
 }
 
-function loadProgressV1Raw(){
-  return safeJsonParse(localStorage.getItem(progressKeyV1()), {});
-}
-
-function migrateFromV1(){
-  const old = loadProgressV1Raw();
-  if(!old || typeof old !== "object" || Object.keys(old).length === 0) return null;
-  const p = createEmptyProgress();
-  const now = nowMs();
-  for(const [id, v] of Object.entries(old)){
-    const card = normalizeCard(v);
-    card.seen = v.attempts || v.seen || 0;
-    card.correct = v.correct || 0;
-    card.wrong = v.wrong || 0;
-    const ts = v.lastAttempt ? Date.parse(v.lastAttempt) : null;
-    card.lastSeenAt = isFinite(ts) ? ts : null;
-    card.lastAnsweredAt = card.lastSeenAt;
-    card.sr = {...defaultSr(), dueAt: now};
-    card.mistake = defaultMistake();
-    p.cards[id] = card;
-  }
-  saveProgress(p);
-  return p;
+async function initProgress(){
+  if(PROGRESS_CACHE) return PROGRESS_CACHE;
+  const remote = await fetchProgressFromApi();
+  const progress = remote || createEmptyProgress();
+  PROGRESS_CACHE = normalizeProgress(progress);
+  return PROGRESS_CACHE;
 }
 
 function loadProgress(){
   if(PROGRESS_CACHE) return PROGRESS_CACHE;
-  const existing = loadProgressStored();
-  if(existing){ PROGRESS_CACHE = existing; return existing; }
-  const migrated = migrateFromV1();
-  if(migrated){ PROGRESS_CACHE = migrated; return migrated; }
   const empty = createEmptyProgress();
-  saveProgress(empty);
   PROGRESS_CACHE = empty;
   return empty;
 }
@@ -253,16 +212,17 @@ function loadProgress(){
 function saveProgress(p){
   const obj = normalizeProgress(p || {});
   obj.updatedAt = nowMs();
-  localStorage.setItem(progressKeyV2(), JSON.stringify(obj));
   PROGRESS_CACHE = obj;
   return obj;
 }
 
-function resetProgress(){
-  localStorage.removeItem(progressKeyV2());
-  localStorage.removeItem(progressKeyV1());
-  localStorage.removeItem(ongoingTestKey());
+async function resetProgress(){
+  await apiRequest(`/import/progress`, {
+    method: "POST",
+    body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, reset: true})
+  });
   PROGRESS_CACHE = null;
+  await initProgress();
 }
 
 function getOrCreateCard(p, id){
@@ -305,6 +265,46 @@ function applySpacedRepetition(card, grade){
   card.sr = sr;
   card.lastAnsweredAt = now;
   return sr;
+}
+
+function isoToMs(value){
+  if(!value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function applyRemoteProgressCard(progress, remote){
+  if(!remote || !remote.questionId) return;
+  const card = normalizeCard({
+    seen: remote.seen || 0,
+    correct: remote.correct || 0,
+    wrong: remote.wrong || 0,
+    lastSeenAt: isoToMs(remote.lastSeenAt),
+    lastAnsweredAt: isoToMs(remote.lastAnsweredAt),
+    lastImportedAt: isoToMs(remote.lastImportedAt),
+    sr: {
+      dueAt: isoToMs(remote.srDueAt) || nowMs(),
+      intervalDays: remote.srIntervalDays || 0,
+      ease: remote.srEase || 2.5,
+      reps: remote.srReps || 0,
+      lapses: remote.srLapses || 0,
+      lastGrade: remote.srLastGrade || null
+    },
+    mistake: {
+      lastReason: remote.mistakeLastReason || null,
+      reasonCounts: remote.mistakeReasonCounts || {},
+      lastNote: remote.mistakeLastNote || null
+    }
+  });
+  progress.cards[remote.questionId] = card;
+}
+
+async function recordAttempt(payload){
+  const res = await apiRequest("/attempts", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+  return res.progressCard || null;
 }
 
 function recordAttemptHistory(p, entry){
@@ -709,47 +709,13 @@ function renderStats(){
 
 function renderData(){
   setCurrentView("data");
-  const cfgRef = loadCloudConfig();
-  let cloudMeta = loadCloudStatus();
-  let conflictPayload = null;
-  const corruptInfo = PROGRESS_CORRUPT_INFO || safeJsonParse(localStorage.getItem(`${progressKeyV2()}_corrupt_at`), null);
-
-  const cloudMessage = el("div", {class:"status status--muted"}, ["クラウド同期は任意設定です。オフラインでも学習できます。"]);
-  const corruptMessage = el("div", {class:"status status--warn", style: corruptInfo ? "" : "display:none"}, [
-    "⚠️ 進捗データの破損を検知しました。バックアップを保存しました（",
-    typeof corruptInfo === "string" ? corruptInfo : (corruptInfo?.detectedAt || "日時不明"),
-    "）。JSONのインポートで復旧できるか確認してください。"
-  ]);
-  const cloudMetaNode = el("div", {class:"small"}, []);
-  const cloudConflictNode = el("div", {class:"small status status--warn"}, []);
+  const cfgRef = loadApiConfig();
   const importStatusNode = el("div", {class:"status status--muted", style:"display:none"}, []);
   const dataSummaryNode = el("div", {class:"small"}, []);
-  const normalizeVersion = (v) => {
-    if(v === null || v === undefined) return null;
-    const num = Number(v);
-    return Number.isFinite(num) ? num : null;
-  };
-
-  function updateCloudMetaText(){
-    const parts = [];
-    parts.push(`最終同期: ${formatDateTime(cloudMeta.lastSyncedAt)}`);
-    parts.push(`クラウド version: ${cloudMeta.lastRemoteVersion ?? "未取得"}`);
-    parts.push(`クラウド更新: ${formatDateTime(cloudMeta.lastRemoteUpdatedAt)}`);
-    setNodeText(cloudMetaNode, parts.join(" / "));
-    if(conflictPayload){
-      setNodeText(cloudConflictNode, `⚠️ 別の端末で更新されています (version ${conflictPayload.version ?? "?"}, ${formatDateTime(conflictPayload.updatedAt)}). 強制上書きするか、クラウドから取得してください。`);
-      cloudConflictNode.style.display = "block";
-    }else{
-      setNodeText(cloudConflictNode, "");
-      cloudConflictNode.style.display = "none";
-    }
-  }
-  updateCloudMetaText();
-
-  function setCloudMessage(msg, variant="info"){
-    cloudMessage.className = `status status--${variant}`;
-    setNodeText(cloudMessage, msg);
-  }
+  const legacyProgress = readLegacyProgress();
+  const legacyMessage = el("div", {class:"status status--warn", style: legacyProgress ? "" : "display:none"}, [
+    "旧バージョンの学習履歴が見つかりました。DBへ移行できます。"
+  ]);
 
   function setImportMessage(msg, variant="info"){
     importStatusNode.className = `status status--${variant}`;
@@ -766,14 +732,9 @@ function renderData(){
 
   const tokenInput = el("input", {
     type:"password",
-    placeholder:"同期トークン（Bearerトークン）",
+    placeholder:"APIトークン（Bearerトークン）",
     value: cfgRef.token,
     onChange: (e) => { cfgRef.token = e.target.value.trim(); }
-  });
-  const rememberToggle = el("input", {
-    type:"checkbox",
-    checked: cfgRef.rememberToken ? "checked" : undefined,
-    onChange: (e) => { cfgRef.rememberToken = e.target.checked; }
   });
   const endpointInput = el("input", {
     type:"url",
@@ -788,160 +749,72 @@ function renderData(){
     onChange: (e) => { cfgRef.userId = e.target.value.trim(); }
   });
 
-  const btnSaveCloud = el("button", {class:"btn btn--muted"}, ["設定を保存"]);
-  const btnPull = el("button", {class:"btn btn--muted"}, ["クラウドから取得"]);
-  const btnPush = el("button", {class:"btn"}, ["クラウドへ送信"]);
-  const btnForce = el("button", {class:"btn btn--danger", disabled:"disabled"}, ["クラウドを強制上書き"]);
-
-  function setBusy(isBusy){
-    [btnSaveCloud, btnPull, btnPush, btnForce].forEach(btn => {
-      if(!btn) return;
-      if(isBusy){
-        btn.setAttribute("disabled", "disabled");
-      }else{
-        if(btn === btnForce && !conflictPayload){
-          btn.setAttribute("disabled", "disabled");
-        }else{
-          btn.removeAttribute("disabled");
-        }
-      }
-    });
-  }
-
-  btnSaveCloud.addEventListener("click", () => {
+  const btnSave = el("button", {class:"btn btn--muted"}, ["API設定を保存"]);
+  btnSave.addEventListener("click", () => {
     try{
-      saveCloudConfig(cfgRef);
-      setCloudMessage("クラウド設定を保存しました。", "ok");
+      saveApiConfig(cfgRef);
+      setImportMessage("API設定を保存しました。", "ok");
     }catch(e){
-      setCloudMessage(e.message || "クラウド設定の保存に失敗しました。", "warn");
+      setImportMessage(e.message || "API設定の保存に失敗しました。", "warn");
     }
   });
 
-  async function handlePull(){
-    if(!cfgRef.token){
-      setCloudMessage("同期トークンを入力してください。", "warn");
+  const btnLegacy = el("button", {class:"btn", onClick: async () => {
+    if(!legacyProgress){
+      setImportMessage("移行できるデータがありません。", "warn");
       return;
     }
-    setBusy(true);
-    setCloudMessage("クラウドから取得中…", "muted");
+    setImportMessage("旧データを移行中…", "muted");
     try{
-      const remote = await fetchCloudState(cfgRef);
-      conflictPayload = null;
-      if(remote.state){
-        saveProgress(remote.state);
-      }
-      cloudMeta = {
-        ...cloudMeta,
-        lastSyncedAt: nowISO(),
-        lastRemoteVersion: normalizeVersion(remote.version),
-        lastRemoteUpdatedAt: remote.updatedAt || null
-      };
-      saveCloudStatus(cloudMeta);
-      updateCloudMetaText();
-      setCloudMessage(remote.state ? "クラウド版を読み込みました。" : "クラウドにデータはまだありません。", "ok");
+      await apiRequest(`/import/progress`, {
+        method: "POST",
+        body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress: legacyProgress})
+      });
+      localStorage.removeItem(legacyProgressKeyV2());
+      localStorage.removeItem(legacyProgressKeyV1());
+      localStorage.removeItem(legacyOngoingTestKey());
+      PROGRESS_CACHE = null;
+      await initProgress();
+      setImportMessage("移行が完了しました。", "ok");
       renderHome();
     }catch(e){
-      setCloudMessage(e.message || "クラウド取得に失敗しました。", "warn");
-    }finally{
-      setBusy(false);
+      setImportMessage(e.message || "移行に失敗しました。", "warn");
     }
-  }
-
-  async function handlePush(force=false){
-    if(!cfgRef.token){
-      setCloudMessage("同期トークンを入力してください。", "warn");
-      return;
-    }
-    setBusy(true);
-    setCloudMessage(force ? "クラウドへ強制送信中…" : "クラウドへ送信中…", "muted");
-    try{
-      const result = await pushCloudState(cfgRef, cloudMeta, {force, baseVersion: conflictPayload?.version ?? null});
-      conflictPayload = null;
-      cloudMeta = {
-        ...cloudMeta,
-        lastSyncedAt: nowISO(),
-        lastRemoteVersion: normalizeVersion(result.version) ?? cloudMeta.lastRemoteVersion,
-        lastRemoteUpdatedAt: result.updatedAt || nowISO()
-      };
-      saveCloudStatus(cloudMeta);
-      updateCloudMetaText();
-      setCloudMessage("クラウドへ保存しました。", "ok");
-    }catch(e){
-      if(e instanceof CloudConflictError){
-        conflictPayload = e.payload || null;
-        if(conflictPayload && conflictPayload.version !== undefined){
-          cloudMeta = {...cloudMeta, lastRemoteVersion: normalizeVersion(conflictPayload.version), lastRemoteUpdatedAt: conflictPayload.updatedAt || cloudMeta.lastRemoteUpdatedAt};
-          saveCloudStatus(cloudMeta);
-        }
-        updateCloudMetaText();
-        setCloudMessage("クラウド側が更新されています。取得するか、強制上書きしてください。", "warn");
-      }else{
-        setCloudMessage(e.message || "クラウド送信に失敗しました。", "warn");
-      }
-    }finally{
-      setBusy(false);
-    }
-  }
-
-  btnPull.addEventListener("click", () => handlePull());
-  btnPush.addEventListener("click", () => handlePush(false));
-  btnForce.addEventListener("click", () => handlePush(true));
-
-  const importInput = el("input", {
-    type:"file",
-    accept:"application/json",
-    onChange: async (e) => {
-      const file = e.target.files?.[0];
-      await handleQuestionsImport(file, setImportMessage, refreshDataSummary);
-      e.target.value = "";
-    }
-  });
+  }}, ["旧データをDBへ移行"]);
 
   const node = viewCard("データ", [
     el("div", {class:"p"}, [
-      "・学習履歴は端末内（localStorage）に保存されます。\n" +
-      "・問題データは選択中デッキの同梱JSONを使用します（必要なら差し替え/インポート可）。"
+      "・学習履歴はDBに保存されます（クラウド同期済み）。\n" +
+      "・オフライン時は閲覧のみになります。"
     ]),
     el("div", {class:"hr"}, []),
     el("div", {class:"row"}, [
       el("button", {class:"btn btn--muted", onClick: exportProgress}, ["学習履歴を書き出す（JSON）"]),
       el("button", {class:"btn btn--muted", onClick: importProgress}, ["学習履歴を読み込む（JSON）"]),
-      el("button", {class:"btn btn--danger", onClick: () => {
+      el("button", {class:"btn btn--danger", onClick: async () => {
         if(confirm("学習履歴と途中保存の模試をリセットします。よろしいですか？")){
-          resetProgress();
-          renderHome();
+          try{
+            await resetProgress();
+            renderHome();
+          }catch(e){
+            alert(e.message || "リセットに失敗しました。");
+          }
         }
       }}, ["学習履歴をリセット"])
     ]),
-    el("div", {class:"hr"}, []),
-    el("div", {class:"h2"}, ["問題データ（上級）"]),
-    el("div", {class:"small"}, ["JSONを差し替えるか、インポートで上書きできます（端末内のみ）。"]),
     el("div", {class:"row"}, [
-      el("button", {class:"btn btn--muted", onClick: exportQuestions}, ["問題データを書き出す（JSON）"]),
-      el("button", {class:"btn btn--muted", onClick: () => importInput.click()}, ["問題データをインポート（JSON）"]),
-      el("button", {class:"btn btn--danger", onClick: () => {
-        if(confirm("カスタム問題データを解除して、同梱データに戻します。よろしいですか？")){
-          localStorage.removeItem(customDataKey());
-          initData().then(renderHome);
-        }
-      }}, ["同梱データに戻す"])
+      el("button", {class:"btn btn--muted", onClick: exportQuestions}, ["問題データを書き出す（JSON）"])
     ]),
-    el("div", {class:"small"}, ["ファイルから読み込み（.json）:"]),
-    importInput,
+    legacyMessage,
+    legacyProgress ? btnLegacy : null,
     importStatusNode,
     el("div", {class:"hr"}, []),
-    el("div", {class:"h2"}, ["クラウド同期（単一ユーザー用）"]),
-    el("div", {class:"small"}, [
-      "Vercel Functions / Postgres に学習履歴（progress v3）を同期します。トークンで認証し、バージョンで衝突を検出します。"
-    ]),
+    el("div", {class:"h2"}, ["API設定"]),
+    el("div", {class:"small"}, ["認可トークンとユーザーIDを設定してください。"]),
     el("div", {class:"cloud-grid"}, [
       el("div", {class:"cloud-grid__item"}, [
-        el("div", {class:"small"}, ["同期トークン（必須。入力はマスク表示）"]),
-        tokenInput,
-        el("label", {class:"small"}, [
-          rememberToggle,
-          " この端末にトークンを保存する（共有端末ではOFF推奨）"
-        ])
+        el("div", {class:"small"}, ["APIトークン（必須。入力はマスク表示）"]),
+        tokenInput
       ]),
       el("div", {class:"cloud-grid__item"}, [
         el("div", {class:"small"}, ["APIベースURL（任意。省略時はこのサイトの /api を使用）"]),
@@ -952,22 +825,10 @@ function renderData(){
         userIdInput
       ])
     ]),
-    el("div", {class:"row"}, [
-      btnSaveCloud,
-      btnPull,
-      btnPush,
-      btnForce
-    ]),
-    cloudMessage,
-    corruptMessage,
-    cloudConflictNode,
-    cloudMetaNode,
-    el("div", {class:"small"}, [
-      "同期するデータ: { state: progress v3 JSON, version, updatedAt } / API: GET・PUT /api/state"
-    ]),
+    el("div", {class:"row"}, [btnSave]),
     el("div", {class:"hr"}, []),
-    dataSummaryNode,
-  ]);
+    dataSummaryNode
+  ].filter(Boolean));
   mount(node);
 }
 
@@ -985,14 +846,19 @@ function downloadText(filename, text){
 }
 
 function exportProgress(){
-  const payload = {
-    appVersion: APP_VERSION,
-    exportedAt: nowISO(),
-    questionsCount: QUESTIONS.length,
-    progress: loadProgress(),
-    ongoingTest: loadOngoingTest()
-  };
-  downloadText(`neuro_progress_v${APP_VERSION}.json`, JSON.stringify(payload, null, 2));
+  apiRequest(`/export/progress?deckId=${encodeURIComponent(ACTIVE_DECK?.id || DEFAULT_DECK_ID)}`)
+    .then(res => {
+      const payload = {
+        appVersion: APP_VERSION,
+        exportedAt: nowISO(),
+        questionsCount: QUESTIONS.length,
+        progress: res.progress || createEmptyProgress()
+      };
+      downloadText(`neuro_progress_v${APP_VERSION}.json`, JSON.stringify(payload, null, 2));
+    })
+    .catch(err => {
+      alert(err.message || "エクスポートに失敗しました。");
+    });
 }
 
 function importProgress(){
@@ -1023,7 +889,12 @@ function importProgress(){
       if(!incoming || !incoming.cards || typeof incoming.cards !== "object"){
         throw new Error("invalid");
       }
-      saveProgress(incoming);
+      await apiRequest(`/import/progress`, {
+        method: "POST",
+        body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress: incoming})
+      });
+      PROGRESS_CACHE = null;
+      await initProgress();
       alert("読み込みました。");
       renderHome();
     }catch(e){
@@ -1034,160 +905,12 @@ function importProgress(){
 }
 
 function exportQuestions(){
-  const d = localStorage.getItem(customDataKey()) || JSON.stringify(DATA);
-  downloadText(`${ACTIVE_DECK?.id || DEFAULT_DECK_ID}_questions_v${APP_VERSION}.json`, d);
-}
-
-function normalizeQuestionTypeRaw(type){
-  if(type === "short") return "短答";
-  if(type === "multi") return "複数選択";
-  return "単一選択";
-}
-
-function validateAndNormalizeQuestion(q, idx){
-  const errors = [];
-  if(!q || typeof q !== "object"){
-    return {ok:false, error:`Q#${idx+1}: invalid question object`};
-  }
-  if(!q.id || typeof q.id !== "string") errors.push("missing id");
-  if(!q.type || typeof q.type !== "string") errors.push("missing type");
-  if(!q.stem || typeof q.stem !== "string") errors.push("missing stem");
-  if(!Array.isArray(q.answer) || q.answer.length === 0) errors.push("missing answer");
-
-  const type = q.type;
-  if(type === "short"){
-    if(!Array.isArray(q.answer) || q.answer.some(a => typeof a !== "string" || !a.trim())){
-      errors.push("short answer must be string array");
-    }
-  }else if(type === "single" || type === "multi"){
-    if(!q.options || typeof q.options !== "object"){
-      errors.push("options are required");
-    }else{
-      const optionKeys = Object.keys(q.options || {});
-      const answers = Array.isArray(q.answer) ? q.answer : [];
-      if(answers.length === 0 || answers.some(a => !optionKeys.includes(a))){
-        errors.push("answer must be option keys");
-      }
-    }
-  }else{
-    errors.push(`unsupported type: ${type}`);
-  }
-
-  if(errors.length){
-    return {ok:false, error:`${q.id || `Q#${idx+1}`}: ${errors.join(", ")}`};
-  }
-
-  const normalized = {
-    ...q,
-    type_raw: q.type_raw || normalizeQuestionTypeRaw(type),
-    options: q.options || {}
-  };
-  return {ok:true, value: normalized};
-}
-
-function summarizeQuestionTypes(list){
-  const counts = {};
-  (list || []).forEach(q => {
-    const key = q.type || "unknown";
-    counts[key] = (counts[key] || 0) + 1;
-  });
-  return counts;
-}
-
-async function handleQuestionsImport(file, setStatus, refreshSummary){
-  if(!file){
-    setStatus("ファイルが選択されていません。", "warn");
-    console.warn("[import] no file selected");
-    return;
-  }
-  console.log("[import] file selected", {name: file.name, size: file.size});
-  let text = "";
-  try{
-    text = await file.text();
-  }catch(e){
-    console.error("[import] file read failed", e);
-    setStatus("ファイルの読み込みに失敗しました。", "warn");
-    return;
-  }
-
-  let obj = null;
-  try{
-    obj = JSON.parse(text);
-    console.log("[import] JSON parse ok", {keys: Object.keys(obj || {})});
-  }catch(e){
-    console.error("[import] JSON parse failed", e);
-    setStatus("JSONのパースに失敗しました。", "warn");
-    return;
-  }
-
-  if(!obj || typeof obj !== "object"){
-    setStatus("JSONがオブジェクト形式ではありません。", "warn");
-    return;
-  }
-  if(typeof obj.version !== "number"){
-    setStatus("version が数値ではありません。", "warn");
-    return;
-  }
-  if(typeof obj.source !== "string" || !obj.source.trim()){
-    setStatus("source が文字列ではありません。", "warn");
-    return;
-  }
-  if(!Array.isArray(obj.questions)){
-    setStatus("questions が配列ではありません。", "warn");
-    return;
-  }
-
-  console.log("[import] questions length", obj.questions.length);
-  const typeCounts = summarizeQuestionTypes(obj.questions);
-  console.log("[import] type counts", typeCounts);
-
-  const valid = [];
-  const rejected = [];
-  obj.questions.forEach((q, idx) => {
-    const res = validateAndNormalizeQuestion(q, idx);
-    if(res.ok){
-      valid.push(res.value);
-    }else{
-      rejected.push({index: idx + 1, id: q?.id || null, reason: res.error});
-    }
-  });
-
-  if(rejected.length){
-    console.warn("[import] validation rejected", {rejected: rejected.length});
-    console.table(rejected.slice(0, 50));
-  }
-
-  if(valid.length === 0){
-    setStatus("有効な問題が0件です。JSONの内容を確認してください。", "warn");
-    return;
-  }
-
   const payload = {
-    version: obj.version,
-    source: obj.source,
-    questions: valid
+    version: DATA?.version || 1,
+    source: DATA?.source || "db",
+    questions: QUESTIONS || []
   };
-  localStorage.setItem(customDataKey(), JSON.stringify(payload));
-  clearOngoingTest();
-  await initData();
-  refreshSummary();
-
-  const message = `import成功: ${payload.source} / ${valid.length}件（除外 ${rejected.length}件）`;
-  console.log("[import] success", {source: payload.source, count: valid.length});
-  setStatus(message, rejected.length ? "warn" : "ok");
-}
-
-function importQuestions(){
-  pickFile(".json", async (txt) => {
-    const tmpFile = new File([txt], "import.json", {type:"application/json"});
-    await handleQuestionsImport(tmpFile, (msg, variant) => {
-      if(variant === "ok"){
-        alert(msg);
-      }else{
-        alert(msg);
-      }
-    }, () => {});
-  });
+  downloadText(`${ACTIVE_DECK?.id || DEFAULT_DECK_ID}_questions_v${APP_VERSION}.json`, JSON.stringify(payload, null, 2));
 }
 
 function pickFile(accept, cb){
@@ -1203,20 +926,6 @@ function pickFile(accept, cb){
   input.click();
 }
 
-function loadCloudConfig(){
-  const legacy = safeJsonParse(localStorage.getItem("neuroStudyCloudConfig_v1"), {});
-  const cfg = safeJsonParse(localStorage.getItem(CLOUD_CONFIG_KEY), {}) || {};
-  const rememberToken = cfg.rememberToken ?? !!(cfg.token || legacy.token);
-  const sessionToken = safeJsonParse(sessionStorage.getItem(CLOUD_SESSION_TOKEN_KEY), "");
-  const resolvedToken = rememberToken ? (cfg.token || legacy.token || "") : (sessionToken || cfg.token || legacy.token || "");
-  return {
-    apiBase: cfg.apiBase || legacy.url || "",
-    token: resolvedToken,
-    rememberToken,
-    userId: cfg.userId || ""
-  };
-}
-
 function normalizeUserId(raw){
   const trimmed = (raw || "").trim();
   if(!trimmed) return "";
@@ -1224,39 +933,25 @@ function normalizeUserId(raw){
   return trimmed;
 }
 
-function saveCloudConfig(cfg){
-  const rememberToken = !!cfg.rememberToken;
+function loadApiConfig(){
+  const stored = safeJsonParse(localStorage.getItem(API_CONFIG_KEY), {});
+  return {
+    apiBase: stored.apiBase || "",
+    token: stored.token || "",
+    userId: stored.userId || ""
+  };
+}
+
+function saveApiConfig(cfg){
   const normalizedUserId = normalizeUserId(cfg.userId);
   if(normalizedUserId === null){
     throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
   }
-  localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify({
+  localStorage.setItem(API_CONFIG_KEY, JSON.stringify({
     apiBase: cfg.apiBase || "",
-    token: rememberToken ? (cfg.token || "") : "",
-    rememberToken,
+    token: cfg.token || "",
     userId: normalizedUserId || ""
   }));
-  if(rememberToken){
-    sessionStorage.removeItem(CLOUD_SESSION_TOKEN_KEY);
-  }else{
-    sessionStorage.setItem(CLOUD_SESSION_TOKEN_KEY, JSON.stringify(cfg.token || ""));
-  }
-}
-
-function loadCloudStatus(){
-  return safeJsonParse(localStorage.getItem(CLOUD_STATUS_KEY), {
-    lastSyncedAt: null,
-    lastRemoteVersion: null,
-    lastRemoteUpdatedAt: null
-  }) || {
-    lastSyncedAt: null,
-    lastRemoteVersion: null,
-    lastRemoteUpdatedAt: null
-  };
-}
-
-function saveCloudStatus(st){
-  localStorage.setItem(CLOUD_STATUS_KEY, JSON.stringify(st || {}));
 }
 
 function buildApiUrl(cfg, path){
@@ -1282,83 +977,46 @@ function buildApiUrl(cfg, path){
   return resolved;
 }
 
-class CloudConflictError extends Error{
-  constructor(payload){
-    super("クラウドデータが別の端末で更新されています。");
-    this.payload = payload;
+async function apiRequest(path, options = {}){
+  const cfg = loadApiConfig();
+  if(!cfg.token){
+    throw new Error("APIトークンが未設定です。データ画面で設定してください。");
   }
-}
-
-async function fetchCloudState(cfg){
-  const normalizedUserId = normalizeUserId(cfg?.userId);
-  if(normalizedUserId === null){
-    throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
-  }
-  const url = buildApiUrl(cfg, "/api/state");
+  const base = cfg.apiBase ? cfg.apiBase.replace(/\/$/, "") : "";
+  const needsApiPrefix = !(base && base.endsWith("/api"));
+  const apiPath = needsApiPrefix ? `/api${path}` : path;
+  const url = buildApiUrl({...cfg, apiBase: base}, apiPath);
   const headers = {
     "Accept": "application/json",
+    ...(options.body ? {"Content-Type": "application/json"} : {}),
     ...(cfg.token ? {Authorization: `Bearer ${cfg.token}`} : {})
-  };
-  const res = await fetch(url, {headers, cache:"no-store"});
-  if(res.status === 401 || res.status === 403){
-    throw new Error("認証に失敗しました。同期トークンを確認してください。");
-  }
-  if(!res.ok){
-    throw new Error(`クラウド取得に失敗しました (HTTP ${res.status})`);
-  }
-  const json = await res.json();
-  return {
-    state: json.state || null,
-    version: json.version ?? null,
-    updatedAt: json.updatedAt || null
-  };
-}
-
-async function pushCloudState(cfg, meta, options={}){
-  const normalizedUserId = normalizeUserId(cfg?.userId);
-  if(normalizedUserId === null){
-    throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
-  }
-  const url = buildApiUrl(cfg, "/api/state");
-  const headers = {
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    ...(cfg.token ? {Authorization: `Bearer ${cfg.token}`} : {})
-  };
-  const progress = loadProgress();
-  const selectedBase = options.force ? (options.baseVersion ?? meta.lastRemoteVersion ?? null) : (meta.lastRemoteVersion ?? null);
-  const baseVersion = (selectedBase === null || selectedBase === undefined || Number.isNaN(Number(selectedBase))) ? null : Number(selectedBase);
-  const body = {
-    state: progress,
-    baseVersion: baseVersion,
-    force: !!options.force
   };
   const res = await fetch(url, {
-    method: "PUT",
+    ...options,
     headers,
-    body: JSON.stringify(body),
-    cache:"no-store"
+    cache: "no-store"
   });
   if(res.status === 401 || res.status === 403){
-    throw new Error("認証に失敗しました。同期トークンを確認してください。");
-  }
-  if(res.status === 409){
-    const payload = await res.json().catch(()=> ({}));
-    throw new CloudConflictError(payload);
+    throw new Error("認証に失敗しました。APIトークンを確認してください。");
   }
   if(!res.ok){
-    throw new Error(`クラウド保存に失敗しました (HTTP ${res.status})`);
+    const message = await res.text().catch(() => "");
+    throw new Error(`APIエラー (HTTP ${res.status}) ${message}`);
   }
-  const json = await res.json();
-  return {
-    version: json.version ?? null,
-    updatedAt: json.updatedAt || nowISO(),
-    state: json.state || progress
-  };
+  return res.json();
+}
+
+async function fetchProgressFromApi(){
+  const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+  const res = await apiRequest(`/export/progress?deckId=${encodeURIComponent(deckId)}`);
+  return res.progress || null;
 }
 
 /* -------- Mock result import -------- */
-function applyImportedAttempt(parsed, graded, rawText, label){
+async function applyImportedAttempt(parsed, graded, rawText, label){
+  if(!navigator.onLine){
+    throw new Error("オフラインのため反映できません。オンラインで再試行してください。");
+  }
   const progress = loadProgress();
   const snapshot = clone(progress);
   snapshot.lastImportUndo = null;
@@ -1393,6 +1051,10 @@ function applyImportedAttempt(parsed, graded, rawText, label){
   recordAttemptHistory(progress, attemptEntry);
   progress.lastImportUndo = {savedAt: nowIso, label: attemptEntry.label, snapshot};
   saveProgress(progress);
+  await apiRequest(`/import/progress`, {
+    method: "POST",
+    body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress})
+  });
   return attemptEntry;
 }
 
@@ -1405,8 +1067,16 @@ function undoLastImport(){
   const restored = normalizeProgress(p.lastImportUndo.snapshot);
   restored.lastImportUndo = null;
   saveProgress(restored);
-  alert("直前のインポートを取り消しました。");
-  renderHome();
+  apiRequest(`/import/progress`, {
+    method: "POST",
+    body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress: restored})
+  }).then(() => {
+    alert("直前のインポートを取り消しました。");
+    renderHome();
+  }).catch(err => {
+    console.error(err);
+    alert(err.message || "取り消しに失敗しました。");
+  });
 }
 
 function renderMockImport(){
@@ -1450,9 +1120,15 @@ function renderMockImport(){
       return;
     }
     const label = `模試インポート (${nowISO().slice(0,10)})`;
-    applyImportedAttempt(parsed, graded, parsed.raw, label);
-    alert("学習履歴を更新しました。復習セット（模試ベース）から取り出せます。");
-    renderHome();
+    applyImportedAttempt(parsed, graded, parsed.raw, label)
+      .then(() => {
+        alert("学習履歴を更新しました。復習セット（模試ベース）から取り出せます。");
+        renderHome();
+      })
+      .catch(err => {
+        console.error(err);
+        alert(err.message || "学習履歴の更新に失敗しました。");
+      });
   }}, ["この結果を学習履歴に反映"]);
 
   const undoBtn = el("button", {class:"btn btn--muted", onClick: () => undoLastImport()}, ["直前のインポートを取り消す（Undo）"]);
@@ -1774,8 +1450,12 @@ function renderQuiz(session){
     }
   }
 
-  function handleGrade(grade, meta){
+  async function handleGrade(grade, meta){
     if(graded) return;
+    if(!navigator.onLine){
+      alert("オフラインのため更新できません。オンライン時に再度お試しください。");
+      return;
+    }
     graded = true;
     const p = loadProgress();
     const card = getOrCreateCard(p, q.id);
@@ -1784,6 +1464,25 @@ function renderQuiz(session){
       logMistake(card, meta.reason, meta.note);
     }
     saveProgress(p);
+    const answerEntry = session.answers[q.id] || {};
+    const chosenAnswers = answerEntry.selected || (answerEntry.text ? [answerEntry.text] : []);
+    const isCorrectFlag = typeof answerEntry.ok === "boolean" ? answerEntry.ok : null;
+    try{
+      const remote = await recordAttempt({
+        deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID,
+        questionId: q.id,
+        grade,
+        chosenAnswers,
+        isCorrect: isCorrectFlag,
+        reason: meta.reason || null,
+        note: meta.note || null
+      });
+      applyRemoteProgressCard(p, remote);
+      saveProgress(p);
+    }catch(err){
+      console.error("[attempt] sync failed", err);
+      alert(err.message || "回答の同期に失敗しました。");
+    }
     goNext();
   }
 
@@ -1799,16 +1498,25 @@ function renderQuiz(session){
     controls.appendChild(noteInput);
 
     const gradeRow = el("div", {class:"row grade-row"}, []);
+    const offline = !navigator.onLine;
     [
       {key:"again", label:"Again", cls:"btn--danger"},
       {key:"hard", label:"Hard", cls:"btn--muted"},
       {key:"good", label:"Good", cls:"btn--ok"},
       {key:"easy", label:"Easy", cls:"btn"}
     ].forEach(g => {
-      const btn = el("button", {class:`btn ${g.cls} btn--sr`, type:"button", onClick: () => handleGrade(g.key, {reason: reasonSel.value || null, note: noteInput.value})}, [g.label]);
+      const btn = el("button", {
+        class:`btn ${g.cls} btn--sr`,
+        type:"button",
+        onClick: () => handleGrade(g.key, {reason: reasonSel.value || null, note: noteInput.value}),
+        ...(offline ? {disabled:"disabled"} : {})
+      }, [g.label]);
       if(!ok && g.key === "again") btn.classList.add("btn--primary");
       gradeRow.appendChild(btn);
     });
+    if(offline){
+      controls.appendChild(el("div", {class:"small"}, ["※オフラインのため評価できません。オンラインで再試行してください。"]));
+    }
     controls.appendChild(el("div", {class:"small"}, ["※評価すると自動で次の問題へ進みます"]));
     controls.appendChild(gradeRow);
 
@@ -1819,10 +1527,12 @@ function renderQuiz(session){
 
   function showResultSelected(selected){
     const ok = isCorrect(q, selected);
-    const p = loadProgress();
-    const card = getOrCreateCard(p, q.id);
-    incrementStats(card, ok);
-    saveProgress(p);
+    if(navigator.onLine){
+      const p = loadProgress();
+      const card = getOrCreateCard(p, q.id);
+      incrementStats(card, ok);
+      saveProgress(p);
+    }
 
     session.answers[q.id] = {selected, ok};
 
@@ -1849,10 +1559,12 @@ function renderQuiz(session){
 
   function showResultShort(inputText){
     const ok = isCorrect(q, inputText);
-    const p = loadProgress();
-    const card = getOrCreateCard(p, q.id);
-    incrementStats(card, ok);
-    saveProgress(p);
+    if(navigator.onLine){
+      const p = loadProgress();
+      const card = getOrCreateCard(p, q.id);
+      incrementStats(card, ok);
+      saveProgress(p);
+    }
 
     session.answers[q.id] = {text: inputText, ok};
 
@@ -1915,40 +1627,74 @@ function renderQuiz(session){
 }
 
 /* -------- Mock test (90 min, 100 Q) -------- */
-function loadOngoingTest(){
-  try{
-    return JSON.parse(localStorage.getItem(ongoingTestKey()) || "null");
-  }catch(e){ return null; }
-}
-function saveOngoingTest(t){
-  localStorage.setItem(ongoingTestKey(), JSON.stringify(t));
-}
-function clearOngoingTest(){
-  localStorage.removeItem(ongoingTestKey());
+async function fetchOngoingTest(){
+  const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+  const res = await apiRequest(`/test-sessions?deckId=${encodeURIComponent(deckId)}`);
+  if(!res.session) return null;
+  const ids = (res.items || []).sort((a,b) => a.orderIndex - b.orderIndex).map(item => item.questionId);
+  return {
+    id: res.session.id,
+    mode: res.session.mode,
+    ids,
+    idx: res.session.meta?.idx || 0,
+    answers: res.session.meta?.answers || {},
+    startedAt: Date.parse(res.session.startedAt || nowISO()),
+    durationSec: res.session.durationSec || 90 * 60,
+    finished: !!res.session.completedAt
+  };
 }
 
-function startMockTest(){
+function saveOngoingTest(test){
+  const meta = {idx: test.idx, answers: test.answers || {}};
+  apiRequest(`/test-sessions`, {
+    method: "PUT",
+    body: JSON.stringify({id: test.id, meta})
+  }).catch(err => {
+    console.error("[test] save failed", err);
+  });
+}
+
+function clearOngoingTest(testId){
+  if(!testId) return;
+  apiRequest(`/test-sessions`, {
+    method: "PUT",
+    body: JSON.stringify({id: testId, completedAt: nowISO()})
+  }).catch(err => {
+    console.error("[test] clear failed", err);
+  });
+}
+
+async function startMockTest(){
   if(deckHasShort()){
     alert("短答問題が含まれているため、このデッキでは模擬テストを利用できません。");
     return;
   }
-  const existing = loadOngoingTest();
-  if(existing && existing.mode==="mock" && existing.ids && confirm("途中保存の模擬テストがあります。再開しますか？")){
-    renderMock(existing);
-    return;
+  try{
+    const existing = await fetchOngoingTest().catch(() => null);
+    if(existing && existing.mode === "mock" && existing.ids && confirm("途中保存の模擬テストがあります。再開しますか？")){
+      renderMock(existing);
+      return;
+    }
+    const res = await apiRequest(`/test-sessions`, {
+      method: "POST",
+      body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, mode: "mock", size: 100})
+    });
+    const test = {
+      id: res.sessionId,
+      mode: "mock",
+      ids: res.questionIds || [],
+      idx: 0,
+      answers: {},
+      startedAt: Date.now(),
+      durationSec: 90 * 60,
+      finished: false
+    };
+    saveOngoingTest(test);
+    renderMock(test);
+  }catch(e){
+    console.error(e);
+    alert(e.message || "模擬テストの開始に失敗しました。");
   }
-  const ids = QUESTIONS.map(q=>q.id); // 100問
-  const test = {
-    mode: "mock",
-    ids,
-    idx: 0,
-    answers: {}, // id -> selected[]
-    startedAt: Date.now(),
-    durationSec: 90*60,
-    finished: false
-  };
-  saveOngoingTest(test);
-  renderMock(test);
 }
 
 function formatTime(sec){
@@ -2040,16 +1786,32 @@ function renderMock(test){
   mockTimerHandle = setInterval(tick, 500);
 }
 
-function applyMockResults(results, reflectToSR){
+async function applyMockResults(results, reflectToSR, sessionId){
+  if(!navigator.onLine){
+    throw new Error("オフラインのため模試結果を保存できません。オンラインで再試行してください。");
+  }
   const p = loadProgress();
-  results.forEach(r => {
+  for(const r of results){
     const card = getOrCreateCard(p, r.id);
     incrementStats(card, r.ok);
-    if(reflectToSR){
-      const grade = r.ok ? "good" : "again";
+    const grade = reflectToSR ? (r.ok ? "good" : "again") : null;
+    if(grade){
       applySpacedRepetition(card, grade);
     }
-  });
+    try{
+      const remote = await recordAttempt({
+        deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID,
+        questionId: r.id,
+        grade,
+        chosenAnswers: r.selected || [],
+        isCorrect: r.ok,
+        sessionId
+      });
+      applyRemoteProgressCard(p, remote);
+    }catch(err){
+      console.error("[mock] attempt sync failed", err);
+    }
+  }
   saveProgress(p);
 }
 
@@ -2066,7 +1828,7 @@ function finishMock(test){
     results.push({id, ok, selected, answer:q.answer, tag:q.tag, type:q.type_raw});
     if(ok) correct += 1;
   }
-  clearOngoingTest();
+  clearOngoingTest(test.id);
 
   const score = Math.round((correct/test.ids.length)*100);
   let reflectChecked = true;
@@ -2079,11 +1841,17 @@ function finishMock(test){
 
   const applyBtn = el("button", {class:"btn", onClick: () => {
     if(applied) return;
-    applyMockResults(results, reflectChecked);
-    applied = true;
-    applyBtn.setAttribute("disabled", "disabled");
-    applyBtn.textContent = "記録済み";
-    alert(reflectChecked ? "模試結果を復習キューに反映しました。" : "正誤だけを進捗に記録しました。");
+    applyMockResults(results, reflectChecked, test.id)
+      .then(() => {
+        applied = true;
+        applyBtn.setAttribute("disabled", "disabled");
+        applyBtn.textContent = "記録済み";
+        alert(reflectChecked ? "模試結果を復習キューに反映しました。" : "正誤だけを進捗に記録しました。");
+      })
+      .catch(err => {
+        console.error(err);
+        alert(err.message || "模試結果の記録に失敗しました。");
+      });
   }}, ["結果を記録"]);
 
   const stNode = viewCard("模擬テスト結果", [
@@ -2124,19 +1892,34 @@ function deckHasShort(){
 
 /* -------- Init -------- */
 async function loadDecks(){
-  const deckUrl = new URL("./data/decks.json", location.href);
-  const res = await fetch(deckUrl.toString(), {cache:"no-store"});
-  const list = await res.json();
-  if(!Array.isArray(list)) throw new Error("decks.json must be array");
-  return list.filter(d => d && typeof d.id === "string" && typeof d.path === "string");
+  const res = await apiRequest("/decks");
+  const list = res.decks || [];
+  if(!Array.isArray(list)) throw new Error("decks response must be array");
+  return list.filter(d => d && typeof d.id === "string");
 }
 
 function ensureDeckDefaults(list){
   const decks = Array.isArray(list) ? list.slice() : [];
   if(!decks.some(d => d.id === DEFAULT_DECK_ID)){
-    decks.unshift({id: DEFAULT_DECK_ID, label:"神経解剖", path:"./data/questions.json"});
+    decks.unshift({id: DEFAULT_DECK_ID, label:"神経解剖"});
   }
   return decks;
+}
+
+async function fetchQuestionsPaged(deckId){
+  const items = [];
+  let cursor = null;
+  while(true){
+    const params = new URLSearchParams({deckId, limit: "500"});
+    if(cursor) params.set("cursor", String(cursor));
+    const res = await apiRequest(`/questions?${params.toString()}`);
+    const chunk = Array.isArray(res.items) ? res.items : [];
+    items.push(...chunk);
+    if(!res.nextCursor || chunk.length === 0) break;
+    if(res.nextCursor === cursor) break;
+    cursor = res.nextCursor;
+  }
+  return items;
 }
 
 function renderDeckSelect(){
@@ -2157,6 +1940,7 @@ function renderDeckSelect(){
     QUESTIONS = [];
     INDEX = {};
     await initData();
+    await initProgress();
     renderHome();
   };
 }
@@ -2172,19 +1956,10 @@ async function initDecks(){
 }
 
 async function initData(){
-  ensureDeckStorageMigration();
-  // custom override
-  const custom = localStorage.getItem(customDataKey());
-  if(custom){
-    try{ DATA = JSON.parse(custom); }catch(e){ DATA = null; }
-  }
-  if(!DATA){
-    const dataPath = ACTIVE_DECK?.path || "./data/questions.json";
-    const dataUrl = new URL(dataPath, location.href);
-    const res = await fetch(dataUrl.toString(), {cache:"no-store"});
-    DATA = await res.json();
-  }
-  QUESTIONS = DATA.questions || [];
+  const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+  const questions = await fetchQuestionsPaged(deckId);
+  DATA = {version: 1, source: "db", questions};
+  QUESTIONS = questions;
   INDEX = {};
   ensureQuestionTags();
   validateQuestions(QUESTIONS);
@@ -2228,11 +2003,20 @@ document.getElementById("navImport").addEventListener("click", () => {
 });
 
 async function initApp(){
-  await initDecks();
-  await initData();
-  loadProgress(); // ensure migration
-  renderHome();
-  registerSW();
+  try{
+    await initDecks();
+    await initData();
+    await initProgress();
+    renderHome();
+    registerSW();
+  }catch(e){
+    console.error(e);
+    mount(viewCard("初期化エラー", [
+      el("div", {class:"p"}, ["APIトークンまたは接続に問題があります。データ画面で設定を確認してください。"]),
+      el("div", {class:"small"}, [String(e?.message || e)]),
+      el("button", {class:"btn", onClick: () => renderData()}, ["データ設定へ"])
+    ]));
+  }
 }
 
 initApp();

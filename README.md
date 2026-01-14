@@ -104,13 +104,13 @@
 - エクスポート/インポートは v3 スキーマを含む JSON です。
 
 ## Cloudflare Pages デプロイ（推奨）
-ビルド不要の静的ホスティングで動きます。Cloudflare Pages では `dist/` 出力を使う設定にしています（UIで `.` 指定が不安定な場合でも確実に動くため）。
+ビルド不要の静的ホスティングで動きます。Cloudflare Pages では `npm run build` が `dist/` を生成しつつ `out/` に同期するため、Pages の出力ディレクトリは `out` を指定してください。
 
 1. Cloudflare Pages → **Create a project** → GitHub 連携で本リポジトリを選択  
 2. Build設定
    - Framework preset: **None**
    - Build command: `npm ci && npm run build`
-   - Build output directory: `dist`
+   - Build output directory: `out`
 3. main ブランチを Production としてデプロイ  
 4. デプロイ後、`https://<project>.pages.dev/` をスマホで開き「ホーム画面に追加」
 

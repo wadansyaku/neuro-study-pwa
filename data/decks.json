@@ -1,4 +1,16 @@
 [
-  {"id":"neuro","label":"神経解剖","path":"./data/questions.json"},
-  {"id":"forensics","label":"法医学","path":"./data/questions_forensics_v1.json"}
+  {
+    "id":"neuro",
+    "displayNameJa":"神経解剖",
+    "shortLabelJa":"神経解剖",
+    "description":"神経解剖学の学習デッキ",
+    "path":"./data/questions.json"
+  },
+  {
+    "id":"forensics",
+    "displayNameJa":"法医学",
+    "shortLabelJa":"法医学",
+    "description":"法医学の学習デッキ",
+    "path":"./data/questions_forensics_v1.json"
+  }
 ]

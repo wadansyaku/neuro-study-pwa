@@ -9,6 +9,12 @@ const IMPORTED_QUESTIONS_KEY_BASE = "neuroStudyImportedQuestions_v1";
 const LEGACY_PROGRESS_KEY_V2_BASE = "neuroStudyProgressV2";
 const LEGACY_PROGRESS_KEY_V1_BASE = "neuroStudyProgress_v1";
 const LEGACY_ONGOING_TEST_KEY_BASE = "neuroStudyOngoingTest_v1";
+const DEFAULT_SETTINGS = {
+  apiBase: "",
+  apiToken: "",
+  useRemote: false,
+  userId: ""
+};
 
 
 const SR_REASON_OPTIONS = [
@@ -56,7 +62,12 @@ function legacyOngoingTestKey(){ return deckScopedKey(LEGACY_ONGOING_TEST_KEY_BA
 /* -------- Utils -------- */
 function nowISO(){ return new Date().toISOString(); }
 function nowMs(){ return Date.now(); }
-function safeJsonParse(str, fallback){ try{ return JSON.parse(str); }catch(e){ return fallback; } }
+function safeJsonParse(str, fallback){
+  if(str === null || str === undefined) return fallback;
+  const trimmed = String(str).trim();
+  if(!trimmed || trimmed === "null") return fallback;
+  try{ return JSON.parse(trimmed); }catch(e){ return fallback; }
+}
 function clamp(num, min, max){ return Math.min(max, Math.max(min, num)); }
 function shuffle(arr){
   const a = arr.slice();
@@ -94,6 +105,60 @@ function padQuestionNumber(num){
 function setCurrentView(name){
   CURRENT_VIEW = name;
   console.log("[view] change", {view: CURRENT_VIEW, path: location.pathname});
+}
+
+function isDevMode(){
+  const host = location.hostname || "";
+  return host === "localhost" || host === "127.0.0.1" || host.endsWith(".pages.dev") || host.includes("pages.dev");
+}
+
+function normalizeSettings(raw){
+  const next = {...DEFAULT_SETTINGS};
+  if(raw && typeof raw === "object"){
+    next.apiBase = typeof raw.apiBase === "string" ? raw.apiBase : "";
+    const token = typeof raw.apiToken === "string"
+      ? raw.apiToken
+      : (typeof raw.token === "string" ? raw.token : "");
+    next.apiToken = token;
+    next.userId = typeof raw.userId === "string" ? raw.userId : "";
+    if(typeof raw.useRemote === "boolean"){
+      next.useRemote = raw.useRemote;
+    }else{
+      next.useRemote = Boolean(token || next.apiBase);
+    }
+  }
+  return next;
+}
+
+function loadSettings(){
+  const raw = localStorage.getItem(API_CONFIG_KEY);
+  const parsed = safeJsonParse(raw, null);
+  return normalizeSettings(parsed);
+}
+
+function saveSettings(cfg){
+  const normalizedUserId = normalizeUserId(cfg.userId);
+  if(normalizedUserId === null){
+    throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
+  }
+  const normalized = normalizeSettings({
+    apiBase: cfg.apiBase || "",
+    apiToken: cfg.apiToken || "",
+    userId: normalizedUserId || "",
+    useRemote: !!cfg.useRemote
+  });
+  localStorage.setItem(API_CONFIG_KEY, JSON.stringify({
+    apiBase: normalized.apiBase,
+    apiToken: normalized.apiToken,
+    userId: normalized.userId,
+    useRemote: normalized.useRemote
+  }));
+  return normalized;
+}
+
+function canUseRemote(){
+  const cfg = loadSettings();
+  return cfg.useRemote && !!cfg.apiToken;
 }
 
 /* -------- Progress model (v3) -------- */
@@ -201,7 +266,14 @@ function readLegacyProgress(){
 
 async function initProgress(){
   if(PROGRESS_CACHE) return PROGRESS_CACHE;
-  const remote = await fetchProgressFromApi();
+  if(!canUseRemote()){
+    PROGRESS_CACHE = createEmptyProgress();
+    return PROGRESS_CACHE;
+  }
+  const remote = await fetchProgressFromApi().catch(err => {
+    console.warn("[progress] fetch failed, fallback to local", err);
+    return null;
+  });
   const progress = remote || createEmptyProgress();
   PROGRESS_CACHE = normalizeProgress(progress);
   return PROGRESS_CACHE;
@@ -222,6 +294,9 @@ function saveProgress(p){
 }
 
 async function resetProgress(){
+  if(!canUseRemote()){
+    throw new Error("リモートAPIが無効です。データ画面で設定してください。");
+  }
   await apiRequest(`/import/progress`, {
     method: "POST",
     body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, reset: true})
@@ -305,6 +380,9 @@ function applyRemoteProgressCard(progress, remote){
 }
 
 async function recordAttempt(payload){
+  if(!canUseRemote()){
+    return null;
+  }
   const res = await apiRequest("/attempts", {
     method: "POST",
     body: JSON.stringify(payload)
@@ -580,9 +658,21 @@ function mount(node){
 /* -------- UI: Home / Stats / Data -------- */
 function renderHome(){
   setCurrentView("home");
+  const settings = loadSettings();
   const st = getStats();
   const progressPct = st.total ? Math.round((st.attempted/st.total)*100) : 0;
   const dueSummary = summarizeDue();
+  const settingsNotice = [];
+
+  if(settings.useRemote && !settings.apiToken){
+    settingsNotice.push(el("div", {class:"status status--warn"}, [
+      "設定が未完了です。データ画面でAPIトークンを入力してください。現在はローカル学習モードです。"
+    ]));
+  }else if(!settings.useRemote){
+    settingsNotice.push(el("div", {class:"status status--muted"}, [
+      "ローカル学習モードで動作しています。リモート同期が必要な場合はデータ画面で設定してください。"
+    ]));
+  }
 
   const kpis = el("div", {class:"kpi"}, [
     el("div", {class:"kpi__item"}, [
@@ -634,6 +724,7 @@ function renderHome(){
   ]);
 
   mount(viewCard("ホーム", [
+    ...settingsNotice,
     kpis,
     el("div", {class:"hr"}, []),
     el("div", {class:"p"}, ["進捗（解いた問題割合）"]),
@@ -715,7 +806,7 @@ function renderStats(){
 function renderData(){
   setCurrentView("data");
   console.log("[view] renderData", {view: CURRENT_VIEW, path: location.pathname});
-  const cfgRef = loadApiConfig();
+  const cfgRef = loadSettings();
   const importStatusNode = el("div", {class:"status status--muted", style:"display:none"}, []);
   const dataSummaryNode = el("div", {class:"small"}, []);
   const legacyProgress = readLegacyProgress();
@@ -762,8 +853,8 @@ function renderData(){
   const tokenInput = el("input", {
     type:"password",
     placeholder:"APIトークン（Bearerトークン）",
-    value: cfgRef.token,
-    onChange: (e) => { cfgRef.token = e.target.value.trim(); }
+    value: cfgRef.apiToken,
+    onChange: (e) => { cfgRef.apiToken = e.target.value.trim(); }
   });
   const endpointInput = el("input", {
     type:"url",
@@ -777,11 +868,24 @@ function renderData(){
     value: cfgRef.userId,
     onChange: (e) => { cfgRef.userId = e.target.value.trim(); }
   });
+  const remoteToggle = el("input", {
+    type:"checkbox",
+    ...(cfgRef.useRemote ? {checked:"checked"} : {}),
+    onChange: (e) => { cfgRef.useRemote = !!e.target.checked; }
+  });
+  const settingsDebug = el("pre", {class:"small", style: isDevMode() ? "" : "display:none"}, []);
+
+  function refreshSettingsDebug(){
+    if(!isDevMode()) return;
+    setNodeText(settingsDebug, JSON.stringify(loadSettings(), null, 2));
+  }
+  refreshSettingsDebug();
 
   const btnSave = el("button", {class:"btn btn--muted"}, ["API設定を保存"]);
   btnSave.addEventListener("click", () => {
     try{
-      saveApiConfig(cfgRef);
+      saveSettings(cfgRef);
+      refreshSettingsDebug();
       setImportMessage("API設定を保存しました。", "ok");
     }catch(e){
       setImportMessage(e.message || "API設定の保存に失敗しました。", "warn");
@@ -844,7 +948,11 @@ function renderData(){
     importStatusNode,
     el("div", {class:"hr"}, []),
     el("div", {class:"h2"}, ["API設定"]),
-    el("div", {class:"small"}, ["認可トークンとユーザーIDを設定してください。"]),
+    el("div", {class:"small"}, ["リモートAPIを使う場合は認可トークンとユーザーIDを設定してください。"]),
+    el("label", {class:"small"}, [
+      remoteToggle,
+      " リモートAPIを使う（オフの場合はローカル学習モード）"
+    ]),
     el("div", {class:"cloud-grid"}, [
       el("div", {class:"cloud-grid__item"}, [
         el("div", {class:"small"}, ["APIトークン（必須。入力はマスク表示）"]),
@@ -861,7 +969,8 @@ function renderData(){
     ]),
     el("div", {class:"row"}, [btnSave]),
     el("div", {class:"hr"}, []),
-    dataSummaryNode
+    dataSummaryNode,
+    settingsDebug
   ].filter(Boolean));
   mount(node);
 }
@@ -880,6 +989,10 @@ function downloadText(filename, text){
 }
 
 function exportProgress(){
+  if(!canUseRemote()){
+    alert("リモートAPIが無効です。データ画面で設定してください。");
+    return;
+  }
   apiRequest(`/export/progress?deckId=${encodeURIComponent(ACTIVE_DECK?.id || DEFAULT_DECK_ID)}`)
     .then(res => {
       const payload = {
@@ -896,6 +1009,10 @@ function exportProgress(){
 }
 
 function importProgress(){
+  if(!canUseRemote()){
+    alert("リモートAPIが無効です。データ画面で設定してください。");
+    return;
+  }
   pickFile(".json", async (txt) => {
     try{
       const obj = JSON.parse(txt);
@@ -1036,16 +1153,16 @@ function pickFile(accept, cb){
 
 async function resetStateAfterQuestionImport(){
   PROGRESS_CACHE = createEmptyProgress();
-  const cfg = loadApiConfig();
-  if(cfg.token && navigator.onLine){
+  const cfg = loadSettings();
+  if(cfg.useRemote && cfg.apiToken && navigator.onLine){
     try{
       await resetProgress();
       console.log("[import] progress reset via API", {deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID});
-    }catch(e){
-      console.warn("[import] progress reset failed", e);
-    }
-  }else{
-    console.log("[import] progress reset skipped (no token or offline)");
+  }catch(e){
+    console.warn("[import] progress reset failed", e);
+  }
+}else{
+    console.log("[import] progress reset skipped (no remote config or offline)");
   }
 }
 
@@ -1118,27 +1235,6 @@ function normalizeUserId(raw){
   return trimmed;
 }
 
-function loadApiConfig(){
-  const stored = safeJsonParse(localStorage.getItem(API_CONFIG_KEY), {});
-  return {
-    apiBase: stored.apiBase || "",
-    token: stored.token || "",
-    userId: stored.userId || ""
-  };
-}
-
-function saveApiConfig(cfg){
-  const normalizedUserId = normalizeUserId(cfg.userId);
-  if(normalizedUserId === null){
-    throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
-  }
-  localStorage.setItem(API_CONFIG_KEY, JSON.stringify({
-    apiBase: cfg.apiBase || "",
-    token: cfg.token || "",
-    userId: normalizedUserId || ""
-  }));
-}
-
 function loadImportedQuestions(deckId){
   const raw = localStorage.getItem(questionsImportKey(deckId));
   if(!raw) return null;
@@ -1175,8 +1271,11 @@ function buildApiUrl(cfg, path){
 }
 
 async function apiRequest(path, options = {}){
-  const cfg = loadApiConfig();
-  if(!cfg.token){
+  const cfg = loadSettings();
+  if(!cfg.useRemote){
+    throw new Error("リモートAPIが無効です。データ画面で設定してください。");
+  }
+  if(!cfg.apiToken){
     throw new Error("APIトークンが未設定です。データ画面で設定してください。");
   }
   const base = cfg.apiBase ? cfg.apiBase.replace(/\/$/, "") : "";
@@ -1186,7 +1285,7 @@ async function apiRequest(path, options = {}){
   const headers = {
     "Accept": "application/json",
     ...(options.body ? {"Content-Type": "application/json"} : {}),
-    ...(cfg.token ? {Authorization: `Bearer ${cfg.token}`} : {})
+    ...(cfg.apiToken ? {Authorization: `Bearer ${cfg.apiToken}`} : {})
   };
   const res = await fetch(url, {
     ...options,
@@ -1204,6 +1303,7 @@ async function apiRequest(path, options = {}){
 }
 
 async function fetchProgressFromApi(){
+  if(!canUseRemote()) return null;
   const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
   const res = await apiRequest(`/export/progress?deckId=${encodeURIComponent(deckId)}`);
   return res.progress || null;
@@ -1211,6 +1311,9 @@ async function fetchProgressFromApi(){
 
 /* -------- Mock result import -------- */
 async function applyImportedAttempt(parsed, graded, rawText, label){
+  if(!canUseRemote()){
+    throw new Error("リモートAPIが無効です。データ画面で設定してください。");
+  }
   if(!navigator.onLine){
     throw new Error("オフラインのため反映できません。オンラインで再試行してください。");
   }
@@ -1649,7 +1752,7 @@ function renderQuiz(session){
 
   async function handleGrade(grade, meta){
     if(graded) return;
-    if(!navigator.onLine){
+    if(canUseRemote() && !navigator.onLine){
       alert("オフラインのため更新できません。オンライン時に再度お試しください。");
       return;
     }
@@ -1695,7 +1798,7 @@ function renderQuiz(session){
     controls.appendChild(noteInput);
 
     const gradeRow = el("div", {class:"row grade-row"}, []);
-    const offline = !navigator.onLine;
+    const offline = canUseRemote() && !navigator.onLine;
     [
       {key:"again", label:"Again", cls:"btn--danger"},
       {key:"hard", label:"Hard", cls:"btn--muted"},
@@ -1825,6 +1928,7 @@ function renderQuiz(session){
 
 /* -------- Mock test (90 min, 100 Q) -------- */
 async function fetchOngoingTest(){
+  if(!canUseRemote()) return null;
   const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
   const res = await apiRequest(`/test-sessions?deckId=${encodeURIComponent(deckId)}`);
   if(!res.session) return null;
@@ -1842,6 +1946,7 @@ async function fetchOngoingTest(){
 }
 
 function saveOngoingTest(test){
+  if(!canUseRemote()) return;
   const meta = {idx: test.idx, answers: test.answers || {}};
   apiRequest(`/test-sessions`, {
     method: "PUT",
@@ -1853,6 +1958,7 @@ function saveOngoingTest(test){
 
 function clearOngoingTest(testId){
   if(!testId) return;
+  if(!canUseRemote()) return;
   apiRequest(`/test-sessions`, {
     method: "PUT",
     body: JSON.stringify({id: testId, completedAt: nowISO()})
@@ -1862,6 +1968,10 @@ function clearOngoingTest(testId){
 }
 
 async function startMockTest(){
+  if(!canUseRemote()){
+    alert("リモートAPIが無効です。データ画面で設定してください。");
+    return;
+  }
   if(deckHasShort()){
     alert("短答問題が含まれているため、このデッキでは模擬テストを利用できません。");
     return;
@@ -2088,7 +2198,26 @@ function deckHasShort(){
 }
 
 /* -------- Init -------- */
+async function loadLocalDecks(){
+  try{
+    const res = await fetch("./data/decks.json", {cache: "no-store"});
+    if(!res.ok) throw new Error("deck fetch failed");
+    const list = await res.json();
+    if(!Array.isArray(list)) throw new Error("decks response must be array");
+    return list.filter(d => d && typeof d.id === "string");
+  }catch(e){
+    console.warn("[decks] local deck load failed", e);
+    return [
+      {id: DEFAULT_DECK_ID, label:"神経解剖", path:"./data/questions.json"}
+    ];
+  }
+}
+
 async function loadDecks(){
+  const cfg = loadSettings();
+  if(!cfg.useRemote){
+    return loadLocalDecks();
+  }
   const res = await apiRequest("/decks");
   const list = res.decks || [];
   if(!Array.isArray(list)) throw new Error("decks response must be array");
@@ -2101,6 +2230,27 @@ function ensureDeckDefaults(list){
     decks.unshift({id: DEFAULT_DECK_ID, label:"神経解剖"});
   }
   return decks;
+}
+
+function resolveLocalQuestionsPath(deckId){
+  const deck = DECKS.find(d => d.id === deckId);
+  if(deck?.path) return deck.path;
+  if(deckId === "forensics") return "./data/questions_forensics_v1.json";
+  return "./data/questions.json";
+}
+
+async function fetchLocalQuestions(deckId){
+  const path = resolveLocalQuestionsPath(deckId);
+  const res = await fetch(path, {cache: "no-store"});
+  if(!res.ok){
+    throw new Error("ローカル問題データの読み込みに失敗しました。");
+  }
+  const parsed = await res.json();
+  const list = Array.isArray(parsed?.questions) ? parsed.questions : (Array.isArray(parsed) ? parsed : null);
+  if(!Array.isArray(list)){
+    throw new Error("ローカル問題データが不正です。");
+  }
+  return list;
 }
 
 async function fetchQuestionsPaged(deckId){
@@ -2146,7 +2296,8 @@ async function initDecks(){
   try{
     DECKS = ensureDeckDefaults(await loadDecks());
   }catch(e){
-    DECKS = ensureDeckDefaults([]);
+    console.warn("[decks] remote load failed, fallback to local", e);
+    DECKS = ensureDeckDefaults(await loadLocalDecks());
   }
   setActiveDeck(getStoredDeckId());
   renderDeckSelect();
@@ -2160,9 +2311,23 @@ async function initData(){
     DATA = {version: imported.version || 1, source: imported.source || "import", questions: imported.questions};
     QUESTIONS = imported.questions;
   }else{
-    const questions = await fetchQuestionsPaged(deckId);
-    DATA = {version: 1, source: "db", questions};
-    QUESTIONS = questions;
+    const cfg = loadSettings();
+    if(cfg.useRemote && cfg.apiToken){
+      try{
+        const questions = await fetchQuestionsPaged(deckId);
+        DATA = {version: 1, source: "db", questions};
+        QUESTIONS = questions;
+      }catch(e){
+        console.warn("[data] remote fetch failed, fallback to local", e);
+        const questions = await fetchLocalQuestions(deckId);
+        DATA = {version: 1, source: "local", questions};
+        QUESTIONS = questions;
+      }
+    }else{
+      const questions = await fetchLocalQuestions(deckId);
+      DATA = {version: 1, source: "local", questions};
+      QUESTIONS = questions;
+    }
   }
   INDEX = {};
   ensureQuestionTags();
@@ -2198,7 +2363,14 @@ document.getElementById("navData").addEventListener("click", () => {
     renderData();
   }catch(e){
     console.error("[nav] renderData failed", e);
-    mount(viewCard("エラー", [el("div", {class:"p"}, ["データ画面の表示に失敗しました。コンソールのエラーを確認してください。"])]));
+    const details = [
+      el("div", {class:"p"}, ["データ画面の表示に失敗しました。"]),
+      el("div", {class:"small"}, [String(e?.message || e || "unknown error")])
+    ];
+    if(e?.stack){
+      details.push(el("pre", {class:"small"}, [e.stack]));
+    }
+    mount(viewCard("エラー", details));
   }
 });
 document.getElementById("navImport").addEventListener("click", () => {
@@ -2208,6 +2380,17 @@ document.getElementById("navImport").addEventListener("click", () => {
 
 async function initApp(){
   try{
+    const rawSettings = localStorage.getItem(API_CONFIG_KEY);
+    const parsedSettings = safeJsonParse(rawSettings, null);
+    const normalizedSettings = normalizeSettings(parsedSettings);
+    if(isDevMode()){
+      console.log("[init] settings snapshot", {
+        key: API_CONFIG_KEY,
+        raw: rawSettings,
+        parsed: parsedSettings,
+        normalized: normalizedSettings
+      });
+    }
     await initDecks();
     await initData();
     await initProgress();

@@ -15,5 +15,8 @@
   },
   "devDependencies": {
     "vercel": "^50.1.5"
+  },
+  "cloudflare": {
+    "outputDirectory": "out"
   }
 }

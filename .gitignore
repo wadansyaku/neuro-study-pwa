@@ -1,5 +1,7 @@
 node_modules
 .vercel
+dist
+out
 .DS_Store
 .env.local
 .env

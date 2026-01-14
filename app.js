@@ -1,8 +1,10 @@
-/* 神経解剖学 学習Webアプリ - Vanilla JS / Offline-first */
+/* 学習Webアプリ - Vanilla JS / Offline-first */
 
 const APP_VERSION = 6;
 const PROGRESS_VERSION = 3;
+const APP_BASE_NAME = "学習Webアプリ";
 const DEFAULT_DECK_ID = "neuro";
+const DEFAULT_DECK_NAME = "神経解剖";
 const DECK_SELECTION_KEY = "neuroStudySelectedDeck_v1";
 const API_CONFIG_KEY = "neuroStudyApiConfig_v3";
 const IMPORTED_QUESTIONS_KEY_BASE = "neuroStudyImportedQuestions_v1";
@@ -51,7 +53,12 @@ function getStoredDeckId(){
 
 function setActiveDeck(deckId){
   const next = DECKS.find(d => d.id === deckId) || DECKS[0];
-  ACTIVE_DECK = next || {id: DEFAULT_DECK_ID, label:"神経解剖"};
+  ACTIVE_DECK = next || {
+    id: DEFAULT_DECK_ID,
+    label: DEFAULT_DECK_NAME,
+    displayNameJa: DEFAULT_DECK_NAME,
+    shortLabelJa: DEFAULT_DECK_NAME
+  };
   localStorage.setItem(DECK_SELECTION_KEY, ACTIVE_DECK.id);
 }
 
@@ -100,6 +107,44 @@ function uniq(arr){
 }
 function padQuestionNumber(num){
   return `Q${String(num).padStart(3,"0")}`;
+}
+
+function normalizeDeck(deck){
+  if(!deck || typeof deck !== "object") return null;
+  const id = typeof deck.id === "string" ? deck.id : null;
+  if(!id) return null;
+  const displayNameJa = typeof deck.displayNameJa === "string" && deck.displayNameJa
+    ? deck.displayNameJa
+    : (typeof deck.label === "string" ? deck.label : "");
+  const shortLabelJa = typeof deck.shortLabelJa === "string" && deck.shortLabelJa
+    ? deck.shortLabelJa
+    : (displayNameJa || deck.label || id);
+  const label = typeof deck.label === "string" && deck.label
+    ? deck.label
+    : (shortLabelJa || displayNameJa || id);
+  const description = typeof deck.description === "string" ? deck.description : "";
+  const path = typeof deck.path === "string" ? deck.path : "";
+  return {id, label, displayNameJa, shortLabelJa, description, path};
+}
+
+function normalizeDecks(list){
+  if(!Array.isArray(list)) return [];
+  return list.map(normalizeDeck).filter(Boolean);
+}
+
+function getDeckDisplayName(deck){
+  return deck?.displayNameJa || deck?.label || deck?.shortLabelJa || deck?.id || DEFAULT_DECK_NAME;
+}
+
+function getDeckShortLabel(deck){
+  return deck?.shortLabelJa || deck?.label || deck?.displayNameJa || deck?.id || DEFAULT_DECK_NAME;
+}
+
+function updateAppTitle(){
+  const deckName = getDeckDisplayName(ACTIVE_DECK);
+  const titleText = deckName ? `${APP_BASE_NAME}（${deckName}）` : APP_BASE_NAME;
+  setNodeText(document.getElementById("appTitle"), titleText);
+  document.title = titleText;
 }
 
 function setCurrentView(name){
@@ -2204,11 +2249,17 @@ async function loadLocalDecks(){
     if(!res.ok) throw new Error("deck fetch failed");
     const list = await res.json();
     if(!Array.isArray(list)) throw new Error("decks response must be array");
-    return list.filter(d => d && typeof d.id === "string");
+    return normalizeDecks(list);
   }catch(e){
     console.warn("[decks] local deck load failed", e);
     return [
-      {id: DEFAULT_DECK_ID, label:"神経解剖", path:"./data/questions.json"}
+      {
+        id: DEFAULT_DECK_ID,
+        label: DEFAULT_DECK_NAME,
+        displayNameJa: DEFAULT_DECK_NAME,
+        shortLabelJa: DEFAULT_DECK_NAME,
+        path:"./data/questions.json"
+      }
     ];
   }
 }
@@ -2221,13 +2272,18 @@ async function loadDecks(){
   const res = await apiRequest("/decks");
   const list = res.decks || [];
   if(!Array.isArray(list)) throw new Error("decks response must be array");
-  return list.filter(d => d && typeof d.id === "string");
+  return normalizeDecks(list);
 }
 
 function ensureDeckDefaults(list){
-  const decks = Array.isArray(list) ? list.slice() : [];
+  const decks = normalizeDecks(list);
   if(!decks.some(d => d.id === DEFAULT_DECK_ID)){
-    decks.unshift({id: DEFAULT_DECK_ID, label:"神経解剖"});
+    decks.unshift({
+      id: DEFAULT_DECK_ID,
+      label: DEFAULT_DECK_NAME,
+      displayNameJa: DEFAULT_DECK_NAME,
+      shortLabelJa: DEFAULT_DECK_NAME
+    });
   }
   return decks;
 }
@@ -2276,7 +2332,7 @@ function renderDeckSelect(){
   DECKS.forEach(deck => {
     const opt = document.createElement("option");
     opt.value = deck.id;
-    opt.textContent = deck.label || deck.id;
+    opt.textContent = getDeckShortLabel(deck);
     sel.appendChild(opt);
   });
   sel.value = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
@@ -2289,6 +2345,7 @@ function renderDeckSelect(){
     await initData();
     await initProgress();
     renderHome();
+    updateAppTitle();
   };
 }
 
@@ -2301,6 +2358,7 @@ async function initDecks(){
   }
   setActiveDeck(getStoredDeckId());
   renderDeckSelect();
+  updateAppTitle();
 }
 
 async function initData(){

@@ -6,8 +6,21 @@ import { readJsonBody, requireString } from "./_lib/validate.js";
 
 const GRADES = new Set(["again", "hard", "good", "easy"]);
 
-function normalizeAnswer(arr){
-  return (arr || []).slice().sort().join("");
+function normalizeOptionKey(value){
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function normalizeOptionList(arr){
+  const normalized = (arr || []).map(normalizeOptionKey).filter(Boolean);
+  return Array.from(new Set(normalized));
+}
+
+function isSameOptionSet(a, b){
+  if(a.size !== b.size) return false;
+  for(const v of a){
+    if(!b.has(v)) return false;
+  }
+  return true;
 }
 
 function normalizeShortAnswer(input){
@@ -24,7 +37,9 @@ function isCorrectAnswer(question, chosenAnswers){
     const normalized = normalizeShortAnswer(userInput);
     return (question.answer_texts || []).some(ans => normalizeShortAnswer(ans) === normalized);
   }
-  return normalizeAnswer(question.answer_keys || []) === normalizeAnswer(chosenAnswers || []);
+  const answerSet = new Set(normalizeOptionList(question.answer_keys || []));
+  const selectedSet = new Set(normalizeOptionList(chosenAnswers || []));
+  return isSameOptionSet(answerSet, selectedSet);
 }
 
 function mapProgressRow(row){

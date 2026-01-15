@@ -1110,9 +1110,10 @@ function exportQuestions(){
 }
 
 function summarizeQuestionTypes(list){
-  const counts = {single: 0, short: 0, other: 0};
+  const counts = {single: 0, multi: 0, short: 0, other: 0};
   (list || []).forEach(q => {
     if(q?.type === "single") counts.single += 1;
+    else if(q?.type === "multi") counts.multi += 1;
     else if(q?.type === "short") counts.short += 1;
     else counts.other += 1;
   });
@@ -1148,7 +1149,7 @@ function validateImportedQuestions(list){
       rejected.push({...base, reason: "short未対応"});
       return;
     }
-    if(q.type !== "single"){
+    if(q.type !== "single" && q.type !== "multi"){
       rejected.push({...base, reason: "type未対応"});
       return;
     }
@@ -1157,16 +1158,18 @@ function validateImportedQuestions(list){
       return;
     }
     const optionKeys = Object.keys(q.options || {});
+    const normalizedOptionKeys = optionKeys.map(k => normalizeOptionKey(k));
     const answers = Array.isArray(q.answer) ? q.answer : (typeof q.answer === "string" ? [q.answer] : []);
     if(optionKeys.length === 0){
       rejected.push({...base, reason: "options empty"});
       return;
     }
-    if(answers.length === 0 || answers.some(a => !optionKeys.includes(a))){
+    const normalizedAnswers = answers.map(a => normalizeOptionKey(a));
+    if(normalizedAnswers.length === 0 || normalizedAnswers.some(a => !normalizedOptionKeys.includes(a))){
       rejected.push({...base, reason: "answer invalid"});
       return;
     }
-    const normalized = {...q, answer: answers};
+    const normalized = {...q, answer: normalizedAnswers};
     accepted.push(normalized);
   });
   return {accepted, rejected};
@@ -1247,7 +1250,7 @@ async function importQuestionsFromFile(file, {setImportMessage, refreshDataSumma
 
   if(accepted.length === 0){
     const reasonNote = rejectedSummary ? `（除外理由: ${rejectedSummary}）` : "";
-    setImportMessage(`取り込める単一選択問題がありませんでした。shortは未対応です。${reasonNote}`, "warn");
+    setImportMessage(`取り込める問題がありませんでした。shortは未対応です。${reasonNote}`, "warn");
     return;
   }
 
@@ -1544,9 +1547,6 @@ function renderTopicSelect(){
 }
 
 /* -------- Practice / Quiz engine -------- */
-function normalizeAnswer(arr){
-  return (arr||[]).slice().sort().join("");
-}
 function normalizeShortAnswer(input){
   return String(input ?? "")
     .normalize("NFKC")
@@ -1554,21 +1554,41 @@ function normalizeShortAnswer(input){
     .replace(/[\s\u3000]+/g, "")
     .toLowerCase();
 }
+function normalizeOptionKey(key){
+  return String(key ?? "").trim().toUpperCase();
+}
+function normalizeOptionList(arr){
+  const normalized = (arr || []).map(normalizeOptionKey).filter(Boolean);
+  return Array.from(new Set(normalized));
+}
+function isSameOptionSet(a, b){
+  if(a.size !== b.size) return false;
+  for(const v of a){
+    if(!b.has(v)) return false;
+  }
+  return true;
+}
+function formatOptionKeys(keys){
+  const normalized = normalizeOptionList(keys).sort();
+  return normalized.join("・");
+}
 function isCorrect(q, selectedLetters){
   if(q.type === "short"){
     const userInput = Array.isArray(selectedLetters) ? selectedLetters.join("") : selectedLetters;
     const normalized = normalizeShortAnswer(userInput);
     return (q.answer || []).some(ans => normalizeShortAnswer(ans) === normalized);
   }
-  return normalizeAnswer(q.answer) === normalizeAnswer(selectedLetters);
+  const answerSet = new Set(normalizeOptionList(q.answer));
+  const selectedSet = new Set(normalizeOptionList(selectedLetters));
+  return isSameOptionSet(answerSet, selectedSet);
 }
 function getSelectedFromForm(form, qtype){
   const selected = [];
   if(qtype === "single"){
     const v = form.querySelector("input[name='opt']:checked");
-    if(v) selected.push(v.value);
+    if(v) selected.push(normalizeOptionKey(v.value));
   }else{
-    form.querySelectorAll("input[name='opt']:checked").forEach(x => selected.push(x.value));
+    form.querySelectorAll("input[name='opt']:checked").forEach(x => selected.push(normalizeOptionKey(x.value)));
   }
   return selected;
 }
@@ -1881,8 +1901,8 @@ function renderQuiz(session){
 
     session.answers[q.id] = {selected, ok};
 
-    const ansStr = q.answer.join("");
-    const selStr = selected.join("");
+    const ansStr = formatOptionKeys(q.answer);
+    const selStr = formatOptionKeys(selected);
 
     resultBox.style.display = "block";
     resultBox.innerHTML = "";
@@ -1954,6 +1974,10 @@ function renderQuiz(session){
       showResultShort(inputText);
     }else{
       const selected = getSelectedFromForm(form, q.type);
+      if(q.type === "multi" && selected.length === 0){
+        alert("少なくとも1つ選択してください。");
+        return;
+      }
       session.answers[q.id] = {selected};
       showResultSelected(selected);
     }
@@ -2230,7 +2254,7 @@ function finishMock(test){
         el("div", {class:"h2"}, [`${r.id}  ❌`]),
         el("div", {class:"small"}, [`${r.tag} / ${r.type}`]),
         el("div", {class:"p"}, [q.stem]),
-        el("div", {class:"small"}, [`あなた: ${(r.selected||[]).join("") || "(未選択)"} / 正解: ${(r.answer||[]).join("")}`]),
+        el("div", {class:"small"}, [`あなた: ${formatOptionKeys(r.selected) || "(未選択)"} / 正解: ${formatOptionKeys(r.answer)}`]),
         q.explanation ? el("div", {class:"p"}, [q.explanation]) : el("div", {class:"small"}, ["（解説なし）"])
       ]);
     })

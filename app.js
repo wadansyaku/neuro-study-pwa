@@ -1,22 +1,23 @@
-/* 学習Webアプリ - Vanilla JS / Offline-first */
+/* 学習Webアプリ - Vanilla JS / Cloud-first */
+import { createCloudStore } from "./dataStore.js";
+import { loadSession, saveSession, clearSession, hasSession } from "./sessionStore.js";
+import {
+  readLegacyProgressRaw,
+  hasLegacyProgress,
+  clearLegacyProgress,
+  hasLegacyImportedQuestions,
+  clearLegacyImportedQuestions,
+  clearLegacyAppConfig
+} from "./migration/legacyStorage.js";
 
-const APP_VERSION = 6;
+const APP_VERSION = 7;
 const PROGRESS_VERSION = 3;
 const APP_BASE_NAME = "学習Webアプリ";
 const DEFAULT_DECK_ID = "neuro";
 const DEFAULT_DECK_NAME = "神経解剖";
-const DECK_SELECTION_KEY = "neuroStudySelectedDeck_v1";
-const API_CONFIG_KEY = "neuroStudyApiConfig_v3";
-const IMPORTED_QUESTIONS_KEY_BASE = "neuroStudyImportedQuestions_v1";
-const LEGACY_PROGRESS_KEY_V2_BASE = "neuroStudyProgressV2";
-const LEGACY_PROGRESS_KEY_V1_BASE = "neuroStudyProgress_v1";
-const LEGACY_ONGOING_TEST_KEY_BASE = "neuroStudyOngoingTest_v1";
-const DEFAULT_SETTINGS = {
-  apiBase: "",
-  apiToken: "",
-  useRemote: false,
-  userId: ""
-};
+const MIGRATION_KEY_PREFIX = "legacy_progress";
+
+const dataStore = createCloudStore();
 
 
 const SR_REASON_OPTIONS = [
@@ -38,18 +39,7 @@ let INDEX = {}; // id -> question
 let DECKS = [];
 let ACTIVE_DECK = null;
 let CURRENT_VIEW = "init";
-
-function deckScopedKey(baseKey, deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID){
-  return `${baseKey}_${deckId}`;
-}
-
-function questionsImportKey(deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID){
-  return `${IMPORTED_QUESTIONS_KEY_BASE}_${deckId}`;
-}
-
-function getStoredDeckId(){
-  return localStorage.getItem(DECK_SELECTION_KEY) || DEFAULT_DECK_ID;
-}
+const IMPORTED_QUESTIONS = new Map();
 
 function setActiveDeck(deckId){
   const next = DECKS.find(d => d.id === deckId) || DECKS[0];
@@ -59,12 +49,7 @@ function setActiveDeck(deckId){
     displayNameJa: DEFAULT_DECK_NAME,
     shortLabelJa: DEFAULT_DECK_NAME
   };
-  localStorage.setItem(DECK_SELECTION_KEY, ACTIVE_DECK.id);
 }
-
-function legacyProgressKeyV2(){ return deckScopedKey(LEGACY_PROGRESS_KEY_V2_BASE); }
-function legacyProgressKeyV1(){ return deckScopedKey(LEGACY_PROGRESS_KEY_V1_BASE); }
-function legacyOngoingTestKey(){ return deckScopedKey(LEGACY_ONGOING_TEST_KEY_BASE); }
 
 /* -------- Utils -------- */
 function nowISO(){ return new Date().toISOString(); }
@@ -157,53 +142,12 @@ function isDevMode(){
   return host === "localhost" || host === "127.0.0.1" || host.endsWith(".pages.dev") || host.includes("pages.dev");
 }
 
-function normalizeSettings(raw){
-  const next = {...DEFAULT_SETTINGS};
-  if(raw && typeof raw === "object"){
-    next.apiBase = typeof raw.apiBase === "string" ? raw.apiBase : "";
-    const token = typeof raw.apiToken === "string"
-      ? raw.apiToken
-      : (typeof raw.token === "string" ? raw.token : "");
-    next.apiToken = token;
-    next.userId = typeof raw.userId === "string" ? raw.userId : "";
-    if(typeof raw.useRemote === "boolean"){
-      next.useRemote = raw.useRemote;
-    }else{
-      next.useRemote = Boolean(token || next.apiBase);
-    }
-  }
-  return next;
+function getImportedQuestions(deckId){
+  return IMPORTED_QUESTIONS.get(deckId) || null;
 }
 
-function loadSettings(){
-  const raw = localStorage.getItem(API_CONFIG_KEY);
-  const parsed = safeJsonParse(raw, null);
-  return normalizeSettings(parsed);
-}
-
-function saveSettings(cfg){
-  const normalizedUserId = normalizeUserId(cfg.userId);
-  if(normalizedUserId === null){
-    throw new Error("ユーザーIDは英数字・-・_のみ、64文字以内にしてください。");
-  }
-  const normalized = normalizeSettings({
-    apiBase: cfg.apiBase || "",
-    apiToken: cfg.apiToken || "",
-    userId: normalizedUserId || "",
-    useRemote: !!cfg.useRemote
-  });
-  localStorage.setItem(API_CONFIG_KEY, JSON.stringify({
-    apiBase: normalized.apiBase,
-    apiToken: normalized.apiToken,
-    userId: normalized.userId,
-    useRemote: normalized.useRemote
-  }));
-  return normalized;
-}
-
-function canUseRemote(){
-  const cfg = loadSettings();
-  return cfg.useRemote && !!cfg.apiToken;
+function saveImportedQuestions(deckId, payload){
+  IMPORTED_QUESTIONS.set(deckId, payload);
 }
 
 /* -------- Progress model (v3) -------- */
@@ -283,16 +227,17 @@ function normalizeProgress(p){
 }
 
 function readLegacyProgress(){
-  const rawV2 = localStorage.getItem(legacyProgressKeyV2());
+  const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+  const {rawV2, rawV1} = readLegacyProgressRaw(deckId);
   if(rawV2){
     const parsed = safeJsonParse(rawV2, null);
     return parsed ? normalizeProgress(parsed) : null;
   }
-  const rawV1 = safeJsonParse(localStorage.getItem(legacyProgressKeyV1()), {});
-  if(rawV1 && typeof rawV1 === "object" && Object.keys(rawV1).length){
+  const rawV1Parsed = safeJsonParse(rawV1, {});
+  if(rawV1Parsed && typeof rawV1Parsed === "object" && Object.keys(rawV1Parsed).length){
     const p = createEmptyProgress();
     const now = nowMs();
-    for(const [id, v] of Object.entries(rawV1)){
+    for(const [id, v] of Object.entries(rawV1Parsed)){
       const card = normalizeCard(v);
       card.seen = v.attempts || v.seen || 0;
       card.correct = v.correct || 0;
@@ -311,15 +256,9 @@ function readLegacyProgress(){
 
 async function initProgress(){
   if(PROGRESS_CACHE) return PROGRESS_CACHE;
-  if(!canUseRemote()){
-    PROGRESS_CACHE = createEmptyProgress();
-    return PROGRESS_CACHE;
-  }
-  const remote = await fetchProgressFromApi().catch(err => {
-    console.warn("[progress] fetch failed, fallback to local", err);
-    return null;
-  });
-  const progress = remote || createEmptyProgress();
+  const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+  const remote = await dataStore.exportProgress(deckId);
+  const progress = remote?.progress || createEmptyProgress();
   PROGRESS_CACHE = normalizeProgress(progress);
   return PROGRESS_CACHE;
 }
@@ -339,12 +278,9 @@ function saveProgress(p){
 }
 
 async function resetProgress(){
-  if(!canUseRemote()){
-    throw new Error("リモートAPIが無効です。データ画面で設定してください。");
-  }
-  await apiRequest(`/import/progress`, {
-    method: "POST",
-    body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, reset: true})
+  await dataStore.importProgress({
+    deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID,
+    reset: true
   });
   PROGRESS_CACHE = null;
   await initProgress();
@@ -425,13 +361,7 @@ function applyRemoteProgressCard(progress, remote){
 }
 
 async function recordAttempt(payload){
-  if(!canUseRemote()){
-    return null;
-  }
-  const res = await apiRequest("/attempts", {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
+  const res = await dataStore.recordAttempt(payload);
   return res.progressCard || null;
 }
 
@@ -703,19 +633,19 @@ function mount(node){
 /* -------- UI: Home / Stats / Data -------- */
 function renderHome(){
   setCurrentView("home");
-  const settings = loadSettings();
   const st = getStats();
   const progressPct = st.total ? Math.round((st.attempted/st.total)*100) : 0;
   const dueSummary = summarizeDue();
+  const session = loadSession();
   const settingsNotice = [];
-
-  if(settings.useRemote && !settings.apiToken){
+  if(!navigator.onLine){
     settingsNotice.push(el("div", {class:"status status--warn"}, [
-      "設定が未完了です。データ画面でAPIトークンを入力してください。現在はローカル学習モードです。"
+      "オフラインのため学習は開始できません。オンラインに接続してください。"
     ]));
-  }else if(!settings.useRemote){
-    settingsNotice.push(el("div", {class:"status status--muted"}, [
-      "ローカル学習モードで動作しています。リモート同期が必要な場合はデータ画面で設定してください。"
+  }else{
+    const userLabel = session.userId ? `ユーザー: ${session.userId}` : "ユーザー: default";
+    settingsNotice.push(el("div", {class:"status status--ok"}, [
+      `クラウドDBに保存中（${userLabel}）`
     ]));
   }
 
@@ -848,16 +778,19 @@ function renderStats(){
   ]));
 }
 
-function renderData(){
+async function renderData(){
   setCurrentView("data");
   console.log("[view] renderData", {view: CURRENT_VIEW, path: location.pathname});
-  const cfgRef = loadSettings();
+  if(!hasSession()){
+    renderLogin({message: "クラウド利用にはログインが必要です。"});
+    return;
+  }
+  const session = loadSession();
   const importStatusNode = el("div", {class:"status status--muted", style:"display:none"}, []);
   const dataSummaryNode = el("div", {class:"small"}, []);
   const legacyProgress = readLegacyProgress();
-  const legacyMessage = el("div", {class:"status status--warn", style: legacyProgress ? "" : "display:none"}, [
-    "旧バージョンの学習履歴が見つかりました。DBへ移行できます。"
-  ]);
+  const legacyProgressStatus = el("div", {class:"status status--warn", style:"display:none"}, []);
+  const legacyQuestionStatus = el("div", {class:"status status--warn", style:"display:none"}, []);
 
   function setImportMessage(msg, variant="info"){
     importStatusNode.className = `status status--${variant}`;
@@ -898,72 +831,119 @@ function renderData(){
   const tokenInput = el("input", {
     type:"password",
     placeholder:"APIトークン（Bearerトークン）",
-    value: cfgRef.apiToken,
-    onChange: (e) => { cfgRef.apiToken = e.target.value.trim(); }
+    value: session.apiToken,
+    onChange: (e) => { session.apiToken = e.target.value.trim(); }
   });
   const endpointInput = el("input", {
     type:"url",
     placeholder:"APIベースURL（任意。同一オリジンなら空でOK）",
-    value: cfgRef.apiBase,
-    onChange: (e) => { cfgRef.apiBase = e.target.value.trim(); }
+    value: session.apiBase,
+    onChange: (e) => { session.apiBase = e.target.value.trim(); }
   });
   const userIdInput = el("input", {
     type:"text",
     placeholder:"ユーザーID（任意。英数字・-・_のみ）",
-    value: cfgRef.userId,
-    onChange: (e) => { cfgRef.userId = e.target.value.trim(); }
-  });
-  const remoteToggle = el("input", {
-    type:"checkbox",
-    ...(cfgRef.useRemote ? {checked:"checked"} : {}),
-    onChange: (e) => { cfgRef.useRemote = !!e.target.checked; }
+    value: session.userId,
+    onChange: (e) => { session.userId = e.target.value.trim(); }
   });
   const settingsDebug = el("pre", {class:"small", style: isDevMode() ? "" : "display:none"}, []);
 
   function refreshSettingsDebug(){
     if(!isDevMode()) return;
-    setNodeText(settingsDebug, JSON.stringify(loadSettings(), null, 2));
+    setNodeText(settingsDebug, JSON.stringify(loadSession(), null, 2));
   }
   refreshSettingsDebug();
 
-  const btnSave = el("button", {class:"btn btn--muted"}, ["API設定を保存"]);
-  btnSave.addEventListener("click", () => {
+  const btnSave = el("button", {class:"btn btn--muted"}, ["API設定を更新"]);
+  btnSave.addEventListener("click", async () => {
     try{
-      saveSettings(cfgRef);
+      saveSession(session);
       refreshSettingsDebug();
-      setImportMessage("API設定を保存しました。", "ok");
+      setImportMessage("API設定を更新しました。", "ok");
     }catch(e){
-      setImportMessage(e.message || "API設定の保存に失敗しました。", "warn");
+      setImportMessage(e.message || "API設定の更新に失敗しました。", "warn");
     }
   });
 
-  const btnLegacy = el("button", {class:"btn", onClick: async () => {
+  const logoutBtn = el("button", {class:"btn btn--danger", onClick: () => {
+    if(confirm("ログアウトしますか？")){
+      clearSession();
+      renderLogin({message: "ログアウトしました。"});
+    }
+  }}, ["ログアウト"]);
+
+  const migrateBtn = el("button", {class:"btn"}, ["旧データをクラウドへ移行"]);
+  const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+  const migrationKey = `${MIGRATION_KEY_PREFIX}_${deckId}`;
+
+  async function refreshMigrationStatus(){
+    if(!hasLegacyProgress(deckId)){
+      legacyProgressStatus.style.display = "none";
+      return;
+    }
+    try{
+      const res = await dataStore.getMigrationStatus(migrationKey);
+      if(res?.exists){
+        legacyProgressStatus.className = "status status--muted";
+        legacyProgressStatus.style.display = "block";
+        setNodeText(legacyProgressStatus, "旧ローカル進捗はすでに移行済みです。");
+        migrateBtn.setAttribute("disabled", "disabled");
+      }else{
+        legacyProgressStatus.className = "status status--warn";
+        legacyProgressStatus.style.display = "block";
+        setNodeText(legacyProgressStatus, "旧バージョンの学習履歴が見つかりました。クラウドへ移行できます。");
+        migrateBtn.removeAttribute("disabled");
+      }
+    }catch(e){
+      legacyProgressStatus.className = "status status--warn";
+      legacyProgressStatus.style.display = "block";
+      setNodeText(legacyProgressStatus, "移行状態の確認に失敗しました。オンライン状態を確認してください。");
+    }
+  }
+
+  migrateBtn.addEventListener("click", async () => {
     if(!legacyProgress){
       setImportMessage("移行できるデータがありません。", "warn");
       return;
     }
+    if(!navigator.onLine){
+      setImportMessage("オフラインのため移行できません。オンラインで再試行してください。", "warn");
+      return;
+    }
     setImportMessage("旧データを移行中…", "muted");
     try{
-      await apiRequest(`/import/progress`, {
-        method: "POST",
-        body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress: legacyProgress})
-      });
-      localStorage.removeItem(legacyProgressKeyV2());
-      localStorage.removeItem(legacyProgressKeyV1());
-      localStorage.removeItem(legacyOngoingTestKey());
+      await dataStore.importProgress({deckId, progress: legacyProgress});
+      await dataStore.setMigrationComplete(migrationKey);
+      clearLegacyProgress(deckId);
+      clearLegacyImportedQuestions();
       PROGRESS_CACHE = null;
       await initProgress();
       setImportMessage("移行が完了しました。", "ok");
+      await refreshMigrationStatus();
       renderHome();
     }catch(e){
       setImportMessage(e.message || "移行に失敗しました。", "warn");
     }
-  }}, ["旧データをDBへ移行"]);
+  });
+
+  if(hasLegacyImportedQuestions()){
+    legacyQuestionStatus.style.display = "block";
+    setNodeText(legacyQuestionStatus, "旧ローカルの問題インポートデータが残っています。必要なら再インポート後に削除してください。");
+  }
+  const clearLegacyQuestionsBtn = el("button", {class:"btn btn--muted", onClick: () => {
+    clearLegacyImportedQuestions();
+    legacyQuestionStatus.style.display = "none";
+    setImportMessage("旧ローカルの問題インポートデータを削除しました。", "ok");
+  }}, ["旧ローカル問題データを削除"]);
 
   const node = viewCard("データ", [
     el("div", {class:"p"}, [
-      "・学習履歴はDBに保存されます（クラウド同期済み）。\n" +
-      "・オフライン時は閲覧のみになります。"
+      "・学習履歴はクラウドDBに保存されます（ログイン必須）。\n" +
+      "・ローカル永続ストレージには学習データを保存しません。\n" +
+      "・オフライン時は学習を開始できません。"
+    ]),
+    el("div", {class:"status status--muted"}, [
+      session.userId ? `ログイン中: ${session.userId}` : "ログイン中: default"
     ]),
     el("div", {class:"hr"}, []),
     el("div", {class:"row"}, [
@@ -988,15 +968,88 @@ function renderData(){
       el("button", {class:"btn btn--muted", onClick: exportQuestions}, ["問題データを書き出す（JSON）"])
     ]),
     questionFileInput,
-    legacyMessage,
-    legacyProgress ? btnLegacy : null,
+    el("div", {class:"small"}, [
+      "※読み込んだ問題データはこのセッション中のみ利用され、再読み込み後は再インポートが必要です。"
+    ]),
+    legacyProgressStatus,
+    legacyProgress ? migrateBtn : null,
+    legacyQuestionStatus,
+    hasLegacyImportedQuestions() ? clearLegacyQuestionsBtn : null,
     importStatusNode,
     el("div", {class:"hr"}, []),
     el("div", {class:"h2"}, ["API設定"]),
-    el("div", {class:"small"}, ["リモートAPIを使う場合は認可トークンとユーザーIDを設定してください。"]),
-    el("label", {class:"small"}, [
-      remoteToggle,
-      " リモートAPIを使う（オフの場合はローカル学習モード）"
+    el("div", {class:"small"}, ["APIトークンはセッションストレージにのみ保存されます（ブラウザを閉じると消えます）。"]),
+    el("div", {class:"cloud-grid"}, [
+      el("div", {class:"cloud-grid__item"}, [
+        el("div", {class:"small"}, ["APIトークン（必須。入力はマスク表示）"]),
+        tokenInput
+      ]),
+      el("div", {class:"cloud-grid__item"}, [
+        el("div", {class:"small"}, ["APIベースURL（任意。省略時はこのサイトの /api を使用）"]),
+        endpointInput
+      ]),
+      el("div", {class:"cloud-grid__item"}, [
+        el("div", {class:"small"}, ["ユーザーID（任意。英数字・-・_のみ / 64文字以内）"]),
+        userIdInput
+      ])
+    ]),
+    el("div", {class:"row"}, [btnSave, logoutBtn]),
+    el("div", {class:"hr"}, []),
+    dataSummaryNode,
+    settingsDebug
+  ].filter(Boolean));
+  mount(node);
+  await refreshMigrationStatus();
+}
+
+function renderLogin({message} = {}){
+  setCurrentView("login");
+  const session = loadSession();
+  const statusNode = el("div", {class:"status status--muted"}, [
+    message || "クラウドDBに接続して学習します。APIトークンを入力してください。"
+  ]);
+
+  const tokenInput = el("input", {
+    type:"password",
+    placeholder:"APIトークン（Bearerトークン）",
+    value: session.apiToken,
+    onChange: (e) => { session.apiToken = e.target.value.trim(); }
+  });
+  const endpointInput = el("input", {
+    type:"url",
+    placeholder:"APIベースURL（任意。同一オリジンなら空でOK）",
+    value: session.apiBase,
+    onChange: (e) => { session.apiBase = e.target.value.trim(); }
+  });
+  const userIdInput = el("input", {
+    type:"text",
+    placeholder:"ユーザーID（任意。英数字・-・_のみ）",
+    value: session.userId,
+    onChange: (e) => { session.userId = e.target.value.trim(); }
+  });
+
+  const loginBtn = el("button", {class:"btn"}, ["ログイン"]);
+  loginBtn.addEventListener("click", async () => {
+    try{
+      saveSession(session);
+      clearLegacyAppConfig();
+      if(!navigator.onLine){
+        throw new Error("オフラインのためログインできません。オンラインで再試行してください。");
+      }
+      await dataStore.init();
+      await initAuthenticatedApp();
+    }catch(e){
+      console.error(e);
+      clearSession();
+      statusNode.className = "status status--warn";
+      setNodeText(statusNode, e.message || "ログインに失敗しました。");
+    }
+  });
+
+  const node = viewCard("ログイン", [
+    statusNode,
+    el("div", {class:"small"}, [
+      "ログイン後、学習履歴や模試結果はクラウドDBに保存されます。ローカル永続ストレージは使用しません。"
     ]),
     el("div", {class:"cloud-grid"}, [
       el("div", {class:"cloud-grid__item"}, [
@@ -1012,11 +1065,8 @@ function renderData(){
         userIdInput
       ])
     ]),
-    el("div", {class:"row"}, [btnSave]),
-    el("div", {class:"hr"}, []),
-    dataSummaryNode,
-    settingsDebug
-  ].filter(Boolean));
+    el("div", {class:"row"}, [loginBtn])
+  ]);
   mount(node);
 }
 
@@ -1034,11 +1084,11 @@ function downloadText(filename, text){
 }
 
 function exportProgress(){
-  if(!canUseRemote()){
-    alert("リモートAPIが無効です。データ画面で設定してください。");
+  if(!navigator.onLine){
+    alert("オフラインのため書き出しできません。");
     return;
   }
-  apiRequest(`/export/progress?deckId=${encodeURIComponent(ACTIVE_DECK?.id || DEFAULT_DECK_ID)}`)
+  dataStore.exportProgress(ACTIVE_DECK?.id || DEFAULT_DECK_ID)
     .then(res => {
       const payload = {
         appVersion: APP_VERSION,
@@ -1054,12 +1104,11 @@ function exportProgress(){
 }
 
 function importProgress(){
-  if(!canUseRemote()){
-    alert("リモートAPIが無効です。データ画面で設定してください。");
-    return;
-  }
   pickFile(".json", async (txt) => {
     try{
+      if(!navigator.onLine){
+        throw new Error("オフラインのため読み込めません。");
+      }
       const obj = JSON.parse(txt);
       let incoming = null;
       if((obj.version === 2 || obj.version === 3) && obj.cards){
@@ -1085,10 +1134,7 @@ function importProgress(){
       if(!incoming || !incoming.cards || typeof incoming.cards !== "object"){
         throw new Error("invalid");
       }
-      await apiRequest(`/import/progress`, {
-        method: "POST",
-        body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress: incoming})
-      });
+      await dataStore.importProgress({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress: incoming});
       PROGRESS_CACHE = null;
       await initProgress();
       alert("読み込みました。");
@@ -1201,16 +1247,15 @@ function pickFile(accept, cb){
 
 async function resetStateAfterQuestionImport(){
   PROGRESS_CACHE = createEmptyProgress();
-  const cfg = loadSettings();
-  if(cfg.useRemote && cfg.apiToken && navigator.onLine){
-    try{
-      await resetProgress();
-      console.log("[import] progress reset via API", {deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID});
+  if(!navigator.onLine){
+    console.log("[import] progress reset skipped (offline)");
+    return;
+  }
+  try{
+    await resetProgress();
+    console.log("[import] progress reset via API", {deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID});
   }catch(e){
     console.warn("[import] progress reset failed", e);
-  }
-}else{
-    console.log("[import] progress reset skipped (no remote config or offline)");
   }
 }
 
@@ -1276,92 +1321,8 @@ async function importQuestionsFromFile(file, {setImportMessage, refreshDataSumma
   setImportMessage(`問題データを読み込みました（source: ${importSource} / ${accepted.length}件）${note}`, "ok");
 }
 
-function normalizeUserId(raw){
-  const trimmed = (raw || "").trim();
-  if(!trimmed) return "";
-  if(!/^[a-zA-Z0-9_-]{1,64}$/.test(trimmed)) return null;
-  return trimmed;
-}
-
-function loadImportedQuestions(deckId){
-  const raw = localStorage.getItem(questionsImportKey(deckId));
-  if(!raw) return null;
-  const parsed = safeJsonParse(raw, null);
-  if(!parsed || !Array.isArray(parsed.questions)) return null;
-  return parsed;
-}
-
-function saveImportedQuestions(deckId, payload){
-  localStorage.setItem(questionsImportKey(deckId), JSON.stringify(payload));
-}
-
-function buildApiUrl(cfg, path){
-  const base = (cfg && cfg.apiBase) ? cfg.apiBase : "";
-  let resolved = path;
-  try{
-    if(base){
-      resolved = new URL(path, base).toString();
-    }
-  }catch(e){
-    // fallback
-  }
-  const userId = normalizeUserId(cfg?.userId);
-  if(userId){
-    try{
-      const withUser = new URL(resolved, location.href);
-      withUser.searchParams.set("user", userId);
-      return withUser.toString();
-    }catch(e){
-      return resolved;
-    }
-  }
-  return resolved;
-}
-
-async function apiRequest(path, options = {}){
-  const cfg = loadSettings();
-  if(!cfg.useRemote){
-    throw new Error("リモートAPIが無効です。データ画面で設定してください。");
-  }
-  if(!cfg.apiToken){
-    throw new Error("APIトークンが未設定です。データ画面で設定してください。");
-  }
-  const base = cfg.apiBase ? cfg.apiBase.replace(/\/$/, "") : "";
-  const needsApiPrefix = !(base && base.endsWith("/api"));
-  const apiPath = needsApiPrefix ? `/api${path}` : path;
-  const url = buildApiUrl({...cfg, apiBase: base}, apiPath);
-  const headers = {
-    "Accept": "application/json",
-    ...(options.body ? {"Content-Type": "application/json"} : {}),
-    ...(cfg.apiToken ? {Authorization: `Bearer ${cfg.apiToken}`} : {})
-  };
-  const res = await fetch(url, {
-    ...options,
-    headers,
-    cache: "no-store"
-  });
-  if(res.status === 401 || res.status === 403){
-    throw new Error("認証に失敗しました。APIトークンを確認してください。");
-  }
-  if(!res.ok){
-    const message = await res.text().catch(() => "");
-    throw new Error(`APIエラー (HTTP ${res.status}) ${message}`);
-  }
-  return res.json();
-}
-
-async function fetchProgressFromApi(){
-  if(!canUseRemote()) return null;
-  const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
-  const res = await apiRequest(`/export/progress?deckId=${encodeURIComponent(deckId)}`);
-  return res.progress || null;
-}
-
 /* -------- Mock result import -------- */
 async function applyImportedAttempt(parsed, graded, rawText, label){
-  if(!canUseRemote()){
-    throw new Error("リモートAPIが無効です。データ画面で設定してください。");
-  }
   if(!navigator.onLine){
     throw new Error("オフラインのため反映できません。オンラインで再試行してください。");
   }
@@ -1399,10 +1360,7 @@ async function applyImportedAttempt(parsed, graded, rawText, label){
   recordAttemptHistory(progress, attemptEntry);
   progress.lastImportUndo = {savedAt: nowIso, label: attemptEntry.label, snapshot};
   saveProgress(progress);
-  await apiRequest(`/import/progress`, {
-    method: "POST",
-    body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress})
-  });
+  await dataStore.importProgress({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress});
   return attemptEntry;
 }
 
@@ -1415,10 +1373,7 @@ function undoLastImport(){
   const restored = normalizeProgress(p.lastImportUndo.snapshot);
   restored.lastImportUndo = null;
   saveProgress(restored);
-  apiRequest(`/import/progress`, {
-    method: "POST",
-    body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress: restored})
-  }).then(() => {
+  dataStore.importProgress({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, progress: restored}).then(() => {
     alert("直前のインポートを取り消しました。");
     renderHome();
   }).catch(err => {
@@ -1621,6 +1576,7 @@ function pickPracticeIds({count=10, tag=null, ids=null, prioritizeUnlearned=fals
 }
 
 function startPractice({count=10, tag=null, ids=null, prioritizeUnlearned=false}={}){
+  if(!requireSession({online: true})) return;
   const picked = pickPracticeIds({count, tag, ids, prioritizeUnlearned});
   if(picked.length === 0){
     alert("出題できる問題が見つかりませんでした。");
@@ -1632,6 +1588,7 @@ function startPractice({count=10, tag=null, ids=null, prioritizeUnlearned=false}
 }
 
 function startDailyReview(){
+  if(!requireSession({online: true})) return;
   const ids = buildReviewQueue(DAILY_REVIEW_LIMIT);
   if(ids.length === 0){
     alert("今日やるべき問題はありません。新しい問題を解きましょう！");
@@ -1642,6 +1599,7 @@ function startDailyReview(){
 }
 
 function startMockReview(count=20){
+  if(!requireSession({online: true})) return;
   const ids = buildMockReviewQueue(count);
   if(ids.length === 0){
     alert("直近の模試インポートが見つかりません。先に模試結果をインポートしてください。");
@@ -1671,6 +1629,7 @@ function buildReviewQueue(limit){
 }
 
 function startWeakReview(){
+  if(!requireSession({online: true})) return;
   const p = loadProgress();
   const now = nowMs();
   const scored = QUESTIONS.map(q => {
@@ -1817,7 +1776,7 @@ function renderQuiz(session){
 
   async function handleGrade(grade, meta){
     if(graded) return;
-    if(canUseRemote() && !navigator.onLine){
+    if(!navigator.onLine){
       alert("オフラインのため更新できません。オンライン時に再度お試しください。");
       return;
     }
@@ -1863,7 +1822,7 @@ function renderQuiz(session){
     controls.appendChild(noteInput);
 
     const gradeRow = el("div", {class:"row grade-row"}, []);
-    const offline = canUseRemote() && !navigator.onLine;
+    const offline = !navigator.onLine;
     [
       {key:"again", label:"Again", cls:"btn--danger"},
       {key:"hard", label:"Hard", cls:"btn--muted"},
@@ -1997,9 +1956,8 @@ function renderQuiz(session){
 
 /* -------- Mock test (90 min, 100 Q) -------- */
 async function fetchOngoingTest(){
-  if(!canUseRemote()) return null;
   const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
-  const res = await apiRequest(`/test-sessions?deckId=${encodeURIComponent(deckId)}`);
+  const res = await dataStore.getOngoingTest(deckId);
   if(!res.session) return null;
   const ids = (res.items || []).sort((a,b) => a.orderIndex - b.orderIndex).map(item => item.questionId);
   return {
@@ -2015,32 +1973,21 @@ async function fetchOngoingTest(){
 }
 
 function saveOngoingTest(test){
-  if(!canUseRemote()) return;
   const meta = {idx: test.idx, answers: test.answers || {}};
-  apiRequest(`/test-sessions`, {
-    method: "PUT",
-    body: JSON.stringify({id: test.id, meta})
-  }).catch(err => {
+  dataStore.updateTestSession({id: test.id, meta}).catch(err => {
     console.error("[test] save failed", err);
   });
 }
 
 function clearOngoingTest(testId){
   if(!testId) return;
-  if(!canUseRemote()) return;
-  apiRequest(`/test-sessions`, {
-    method: "PUT",
-    body: JSON.stringify({id: testId, completedAt: nowISO()})
-  }).catch(err => {
+  dataStore.updateTestSession({id: testId, completedAt: nowISO()}).catch(err => {
     console.error("[test] clear failed", err);
   });
 }
 
 async function startMockTest(){
-  if(!canUseRemote()){
-    alert("リモートAPIが無効です。データ画面で設定してください。");
-    return;
-  }
+  if(!requireSession({online: true})) return;
   if(deckHasShort()){
     alert("短答問題が含まれているため、このデッキでは模擬テストを利用できません。");
     return;
@@ -2051,9 +1998,10 @@ async function startMockTest(){
       renderMock(existing);
       return;
     }
-    const res = await apiRequest(`/test-sessions`, {
-      method: "POST",
-      body: JSON.stringify({deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID, mode: "mock", size: 100})
+    const res = await dataStore.createTestSession({
+      deckId: ACTIVE_DECK?.id || DEFAULT_DECK_ID,
+      mode: "mock",
+      size: 100
     });
     const test = {
       id: res.sessionId,
@@ -2267,37 +2215,6 @@ function deckHasShort(){
 }
 
 /* -------- Init -------- */
-async function loadLocalDecks(){
-  try{
-    const res = await fetch("./data/decks.json", {cache: "no-store"});
-    if(!res.ok) throw new Error("deck fetch failed");
-    const list = await res.json();
-    if(!Array.isArray(list)) throw new Error("decks response must be array");
-    return normalizeDecks(list);
-  }catch(e){
-    console.warn("[decks] local deck load failed", e);
-    return [
-      {
-        id: DEFAULT_DECK_ID,
-        label: DEFAULT_DECK_NAME,
-        displayNameJa: DEFAULT_DECK_NAME,
-        shortLabelJa: DEFAULT_DECK_NAME,
-        path:"./data/questions.json"
-      }
-    ];
-  }
-}
-
-async function loadDecks(){
-  const cfg = loadSettings();
-  if(!cfg.useRemote){
-    return loadLocalDecks();
-  }
-  const res = await apiRequest("/decks");
-  const list = res.decks || [];
-  if(!Array.isArray(list)) throw new Error("decks response must be array");
-  return normalizeDecks(list);
-}
 
 function ensureDeckDefaults(list){
   const decks = normalizeDecks(list);
@@ -2312,43 +2229,6 @@ function ensureDeckDefaults(list){
   return decks;
 }
 
-function resolveLocalQuestionsPath(deckId){
-  const deck = DECKS.find(d => d.id === deckId);
-  if(deck?.path) return deck.path;
-  if(deckId === "forensics") return "./data/questions_forensics_v1.json";
-  return "./data/questions.json";
-}
-
-async function fetchLocalQuestions(deckId){
-  const path = resolveLocalQuestionsPath(deckId);
-  const res = await fetch(path, {cache: "no-store"});
-  if(!res.ok){
-    throw new Error("ローカル問題データの読み込みに失敗しました。");
-  }
-  const parsed = await res.json();
-  const list = Array.isArray(parsed?.questions) ? parsed.questions : (Array.isArray(parsed) ? parsed : null);
-  if(!Array.isArray(list)){
-    throw new Error("ローカル問題データが不正です。");
-  }
-  return list;
-}
-
-async function fetchQuestionsPaged(deckId){
-  const items = [];
-  let cursor = null;
-  while(true){
-    const params = new URLSearchParams({deckId, limit: "500"});
-    if(cursor) params.set("cursor", String(cursor));
-    const res = await apiRequest(`/questions?${params.toString()}`);
-    const chunk = Array.isArray(res.items) ? res.items : [];
-    items.push(...chunk);
-    if(!res.nextCursor || chunk.length === 0) break;
-    if(res.nextCursor === cursor) break;
-    cursor = res.nextCursor;
-  }
-  return items;
-}
-
 function renderDeckSelect(){
   const sel = document.getElementById("deckSelect");
   if(!sel) return;
@@ -2361,6 +2241,11 @@ function renderDeckSelect(){
   });
   sel.value = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
   sel.onchange = async () => {
+    if(!navigator.onLine){
+      alert("オフラインのためデッキを切り替えられません。オンラインで再試行してください。");
+      sel.value = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
+      return;
+    }
     setActiveDeck(sel.value);
     PROGRESS_CACHE = null;
     DATA = null;
@@ -2374,42 +2259,25 @@ function renderDeckSelect(){
 }
 
 async function initDecks(){
-  try{
-    DECKS = ensureDeckDefaults(await loadDecks());
-  }catch(e){
-    console.warn("[decks] remote load failed, fallback to local", e);
-    DECKS = ensureDeckDefaults(await loadLocalDecks());
-  }
-  setActiveDeck(getStoredDeckId());
+  const decks = await dataStore.getDecks();
+  DECKS = ensureDeckDefaults(decks);
+  const defaultDeck = DECKS.find(d => d.id === DEFAULT_DECK_ID) || DECKS[0];
+  setActiveDeck(defaultDeck?.id || DEFAULT_DECK_ID);
   renderDeckSelect();
   updateAppTitle();
 }
 
 async function initData(){
   const deckId = ACTIVE_DECK?.id || DEFAULT_DECK_ID;
-  const imported = loadImportedQuestions(deckId);
+  const imported = getImportedQuestions(deckId);
   if(imported && Array.isArray(imported.questions) && imported.questions.length > 0){
     console.log("[data] using imported questions", {deckId, count: imported.questions.length});
     DATA = {version: imported.version || 1, source: imported.source || "import", questions: imported.questions};
     QUESTIONS = imported.questions;
   }else{
-    const cfg = loadSettings();
-    if(cfg.useRemote && cfg.apiToken){
-      try{
-        const questions = await fetchQuestionsPaged(deckId);
-        DATA = {version: 1, source: "db", questions};
-        QUESTIONS = questions;
-      }catch(e){
-        console.warn("[data] remote fetch failed, fallback to local", e);
-        const questions = await fetchLocalQuestions(deckId);
-        DATA = {version: 1, source: "local", questions};
-        QUESTIONS = questions;
-      }
-    }else{
-      const questions = await fetchLocalQuestions(deckId);
-      DATA = {version: 1, source: "local", questions};
-      QUESTIONS = questions;
-    }
+    const questions = await dataStore.getQuestionsPaged(deckId);
+    DATA = {version: 1, source: "db", questions};
+    QUESTIONS = questions;
   }
   INDEX = {};
   ensureQuestionTags();
@@ -2433,17 +2301,21 @@ async function registerSW(){
 
 document.getElementById("navHome").addEventListener("click", () => {
   console.log("[nav] home clicked", {path: location.pathname, view: CURRENT_VIEW});
+  if(!requireSession()){
+    return;
+  }
   renderHome();
 });
 document.getElementById("navStats").addEventListener("click", () => {
   console.log("[nav] stats clicked", {path: location.pathname, view: CURRENT_VIEW});
+  if(!requireSession()){
+    return;
+  }
   renderStats();
 });
 document.getElementById("navData").addEventListener("click", () => {
   console.log("[nav] data clicked", {path: location.pathname, view: CURRENT_VIEW});
-  try{
-    renderData();
-  }catch(e){
+  renderData().catch(e => {
     console.error("[nav] renderData failed", e);
     const details = [
       el("div", {class:"p"}, ["データ画面の表示に失敗しました。"]),
@@ -2453,38 +2325,59 @@ document.getElementById("navData").addEventListener("click", () => {
       details.push(el("pre", {class:"small"}, [e.stack]));
     }
     mount(viewCard("エラー", details));
-  }
+  });
 });
 document.getElementById("navImport").addEventListener("click", () => {
   console.log("[nav] mock import clicked", {path: location.pathname, view: CURRENT_VIEW});
+  if(!requireSession()){
+    return;
+  }
   renderMockImport();
 });
 
+function renderOfflineGate(){
+  mount(viewCard("オフライン", [
+    el("div", {class:"p"}, ["オフラインのため学習データにアクセスできません。オンラインで再試行してください。"]),
+    el("button", {class:"btn", onClick: () => initApp()}, ["再読み込み"])
+  ]));
+}
+
+function requireSession({online = false} = {}){
+  if(!hasSession()){
+    renderLogin({message: "ログインが必要です。"});
+    return false;
+  }
+  if(online && !navigator.onLine){
+    renderOfflineGate();
+    return false;
+  }
+  return true;
+}
+
+async function initAuthenticatedApp(){
+  await initDecks();
+  await initData();
+  await initProgress();
+  renderHome();
+}
+
 async function initApp(){
+  registerSW();
+  clearLegacyAppConfig();
+  if(!hasSession()){
+    renderLogin();
+    return;
+  }
+  if(!navigator.onLine){
+    renderOfflineGate();
+    return;
+  }
   try{
-    const rawSettings = localStorage.getItem(API_CONFIG_KEY);
-    const parsedSettings = safeJsonParse(rawSettings, null);
-    const normalizedSettings = normalizeSettings(parsedSettings);
-    if(isDevMode()){
-      console.log("[init] settings snapshot", {
-        key: API_CONFIG_KEY,
-        raw: rawSettings,
-        parsed: parsedSettings,
-        normalized: normalizedSettings
-      });
-    }
-    await initDecks();
-    await initData();
-    await initProgress();
-    renderHome();
-    registerSW();
+    await dataStore.init();
+    await initAuthenticatedApp();
   }catch(e){
     console.error(e);
-    mount(viewCard("初期化エラー", [
-      el("div", {class:"p"}, ["APIトークンまたは接続に問題があります。データ画面で設定を確認してください。"]),
-      el("div", {class:"small"}, [String(e?.message || e)]),
-      el("button", {class:"btn", onClick: () => renderData()}, ["データ設定へ"])
-    ]));
+    renderLogin({message: "APIトークンまたは接続に問題があります。設定を確認してください。"});
   }
 }
 

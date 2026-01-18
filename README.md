@@ -22,9 +22,10 @@
 3) Settings → Pages → Branchをmain / root に設定  
 4) 数分後に表示されるURLをスマホで開き「ホーム画面に追加」
 
-### 初期設定（DB利用時）
+### 初期設定（クラウド必須）
 1) APIホスト（Vercel Functions など）で `SYNC_TOKEN` を設定する  
-2) アプリの「データ」タブで API トークンとユーザーIDを入力する
+2) アプリ起動後、ログイン画面で API トークンとユーザーIDを入力する  
+   - トークンはセッションストレージのみ保持され、ブラウザを閉じると消えます
 
 ## 機能
 - クイック練習（10問）
@@ -42,7 +43,9 @@
 - 短答（穴埋め）問題タイプ
 
 ## 注意
-- 学習履歴は DB に保存されます。端末を変えても同一ユーザーIDで復元できます。
+- 学習履歴はクラウドDBに保存されます。端末を変えても同一ユーザーIDで復元できます。
+- ローカル永続ストレージ（localStorage/IndexedDB）に学習データは保存しません。
+- オフライン時は学習を開始できません（アプリシェルのみ表示されます）。
 - 更新が反映されない場合は、ブラウザの「サイトデータ削除」または「キャッシュの削除」を行ってください（Service Workerのキャッシュが残っている可能性があります）。
 - 開発中に更新が反映されない場合は、Service Worker を解除してから再読み込みしてください（Cloudflare Pages の dev 確認時も同様です）。
 
@@ -117,8 +120,8 @@
 ```
 
 ## 進捗データ（v3）と移行
-- 進捗は DB に保存されます（DB が唯一の正）。
-- 旧 localStorage データは「データ」タブからワンクリックで移行できます。
+- 進捗はクラウドDBに保存されます（DB が唯一の正）。
+- 旧 localStorage データは「データ」タブからワンクリックで移行できます（移行後は自動削除）。
 - エクスポート/インポートは v3 スキーマを含む JSON です。
 
 ## Cloudflare Pages デプロイ（推奨）
@@ -182,6 +185,9 @@ npm run seed
 
 設計の詳細は `docs/architecture.md` を参照してください。
 
+### 環境変数サンプル
+`SYNC_TOKEN` などの例は `.env.example` を参照してください。
+
 ### API概要
 - `GET /api/health` : 200 / `{ok: true}`  
 - `GET /api/decks`  
@@ -191,6 +197,7 @@ npm run seed
 - `POST /api/test-sessions` / `GET /api/test-sessions?id=...`  
 - `GET /api/progress/summary`  
 - `POST /api/import/progress` / `GET /api/export/progress`  
+- `GET /api/migrations?key=...` / `POST /api/migrations`  
 
 ※ `/api/state` は旧同期機能として残っています（deprecated）。
 

@@ -1,14 +1,15 @@
 # アーキテクチャ設計（DB移行/SSOT化）
 
 ## 目的
-- 学習履歴（progress）を localStorage から Postgres に移行し、DB を唯一の正（SSOT）とする（完了）。
+- 学習履歴（progress）を localStorage から Postgres に移行し、**ローカル永続ストレージを廃止**する。
 - 問題データを JSON 同梱から DB 格納へ移行し、10k+ の問題数でも高速に動作できるようにする（完了）。
 - 既存の学習体験（練習/模試/SR/統計/誤答理由/インポート・エクスポート）を維持する。
-- PWA の「インストール」「オフラインで起動（アプリシェル）」は維持し、オフライン時は **閲覧のみ** を採用する。
+- PWA の「インストール」「オフラインで起動（アプリシェル）」は維持し、オフライン時は **学習開始不可** とする。
 
 ## 目標アーキテクチャ概要
 ```
 PWA (index.html/app.js)
+  ├─ DataStore (CloudStore)
   ├─ Service Worker: アプリシェルのキャッシュ
   ├─ API Client
   │   ├─ /api/decks
@@ -19,7 +20,7 @@ PWA (index.html/app.js)
   │   └─ /api/progress/summary
   └─ Offline:
       ├─ shell cached (必須)
-      └─ progress write → 送信キュー or read-only
+      └─ read-only (学習開始不可)
 
 Vercel Functions (/api)
   ├─ Auth: Bearer token / user id
@@ -32,6 +33,7 @@ Postgres
   ├─ progress_cards
   ├─ attempts
   ├─ test_sessions / test_session_items
+  ├─ user_migrations
   └─ schema_migrations
 ```
 
@@ -128,9 +130,16 @@ erDiagram
     int order_index
   }
 
+  user_migrations {
+    text user_id
+    text key
+    timestamptz completed_at
+  }
+
   app_user ||--o{ progress_cards : "has"
   app_user ||--o{ attempts : "logs"
   app_user ||--o{ test_sessions : "starts"
+  app_user ||--o{ user_migrations : "migrates"
   decks ||--o{ questions : "contains"
   questions ||--o{ question_options : "has"
   questions ||--o{ progress_cards : "tracked"
@@ -144,12 +153,14 @@ erDiagram
 - `progress_cards(user_id, deck_id, seen)` で未学習優先取得を最速化。
 - `attempts(user_id, answered_at desc)` で統計/履歴集計を高速化。
 - `test_session_items(session_id, order_index)` で復元を高速化。
+- `user_migrations(user_id)` で移行状態を確認。
 
 ## API仕様（案）
 ### 認可
 - `Authorization: Bearer <token>` を必須。
 - `user` をクエリまたはヘッダで受け、サーバ側で `user_id` として正規化。
 - 認可失敗は `401`。
+- トークンはフロントではセッションストレージのみに保持。
 
 ### エンドポイント
 - `GET /api/decks`
@@ -173,6 +184,8 @@ erDiagram
   - セッション復元。
 - `POST /api/import/progress`
   - 旧 progress JSON を DB へ取り込み。
+- `GET /api/migrations?key=...` / `POST /api/migrations`
+  - 旧ローカル移行済みフラグをクラウド側に保存。
 
 ### エラー
 - `400`: 入力不正
@@ -191,8 +204,8 @@ erDiagram
 
 ## オフライン運用方針
 - **アプリシェルはキャッシュ**、オフラインでも起動可能。
-- progress は **DB優先**。
-- オフライン時は **閲覧のみ**（progress 更新 UI を無効化）
+- 学習履歴は **クラウドのみ**。
+- オフライン時は **学習開始不可**（UIで明示）
 
 ## セキュリティ
 - すべての SQL はパラメタ化。
@@ -202,3 +215,4 @@ erDiagram
 ## 移行インターフェース
 - フロント UI から progress JSON をアップロード可能にする。
 - 旧 localStorage をワンクリックで DB に移行する導線を提供する。
+- 移行済みフラグは `user_migrations` に保存する。

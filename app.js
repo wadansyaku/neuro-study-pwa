@@ -1,6 +1,4 @@
 /* 学習Webアプリ - Vanilla JS / Cloud-first */
-import { createCloudStore } from "./dataStore.js";
-import { loadSession, saveSession, clearSession, hasSession } from "./sessionStore.js";
 import {
   readLegacyProgressRaw,
   hasLegacyProgress,
@@ -16,8 +14,31 @@ const APP_BASE_NAME = "学習Webアプリ";
 const DEFAULT_DECK_ID = "neuro";
 const DEFAULT_DECK_NAME = "神経解剖";
 const MIGRATION_KEY_PREFIX = "legacy_progress";
+const DEFAULT_DECKS = [
+  {
+    id: "neuro",
+    label: "神経解剖",
+    displayNameJa: "神経解剖",
+    shortLabelJa: "神経解剖",
+    path: "./data/questions.json"
+  },
+  {
+    id: "forensics",
+    label: "法医学",
+    displayNameJa: "法医学",
+    shortLabelJa: "法医学",
+    path: "./data/questions_forensics_v1.json"
+  }
+];
 
-const dataStore = createCloudStore();
+let loadSession = () => ({apiBase: "", apiToken: "", userId: ""});
+let saveSession = session => session;
+let clearSession = () => {};
+let hasSession = () => false;
+let dataStore = null;
+
+const APP_BANNERS = [];
+const APP_BANNER_KEYS = new Set();
 
 
 const SR_REASON_OPTIONS = [
@@ -94,6 +115,22 @@ function padQuestionNumber(num){
   return `Q${String(num).padStart(3,"0")}`;
 }
 
+function addAppBanner({message, level = "warn", key} = {}){
+  if(!message) return;
+  if(key){
+    if(APP_BANNER_KEYS.has(key)) return;
+    APP_BANNER_KEYS.add(key);
+  }
+  APP_BANNERS.push({message, level});
+}
+
+function renderAppBanners(){
+  if(APP_BANNERS.length === 0) return null;
+  return el("div", {}, APP_BANNERS.map(item => {
+    return el("div", {class:`status status--${item.level}`}, [item.message]);
+  }));
+}
+
 function normalizeDeck(deck){
   if(!deck || typeof deck !== "object") return null;
   const id = typeof deck.id === "string" ? deck.id : null;
@@ -136,6 +173,32 @@ function setCurrentView(name){
   CURRENT_VIEW = name;
   console.log("[view] change", {view: CURRENT_VIEW, path: location.pathname});
 }
+
+function createUnavailableDataStore(message){
+  const err = new Error(message || "dataStore が初期化されていません。");
+  const fail = async () => { throw err; };
+  return {
+    init: fail,
+    getUser: () => ({userId: "", apiBase: "", isAuthenticated: false}),
+    getDecks: async () => [],
+    getQuestionsPaged: fail,
+    getStats: fail,
+    getDueItems: fail,
+    exportProgress: fail,
+    exportUserData: fail,
+    importProgress: fail,
+    recordAttempt: fail,
+    recordAnswer: fail,
+    importMockExam: fail,
+    getOngoingTest: fail,
+    createTestSession: fail,
+    updateTestSession: fail,
+    getMigrationStatus: fail,
+    setMigrationComplete: fail
+  };
+}
+
+dataStore = createUnavailableDataStore("dataStore が初期化されていません。");
 
 function isDevMode(){
   const host = location.hostname || "";
@@ -627,6 +690,8 @@ function viewCard(title, bodyNodes){
 function mount(node){
   const root = document.getElementById("app");
   root.innerHTML = "";
+  const banners = renderAppBanners();
+  if(banners) root.appendChild(banners);
   root.appendChild(node);
 }
 
@@ -2229,6 +2294,118 @@ function ensureDeckDefaults(list){
   return decks;
 }
 
+function getDefaultDecks(){
+  return normalizeDecks(DEFAULT_DECKS);
+}
+
+function previewText(text, size = 10){
+  return String(text || "").trim().slice(0, size);
+}
+
+function buildDeckFetchErrorMessage(url, status, preview){
+  const statusText = status ? `HTTP ${status}` : "HTTP ?";
+  const firstChars = preview ? ` / 先頭文字 ${preview}` : "";
+  return `デッキ定義の読み込みに失敗しました: ${url} ${statusText}${firstChars}`;
+}
+
+async function checkStaticAsset(url, label){
+  return fetch(url, {cache: "no-store"})
+    .then(async res => {
+      const text = await res.text().catch(() => "");
+      const preview = previewText(text);
+      if(!res.ok){
+        addAppBanner({
+          key: `static-${label}-status`,
+          message: `静的ファイル ${label} の取得に失敗しました: ${url} HTTP ${res.status} / 先頭文字 ${preview}`
+        });
+        return;
+      }
+      if(preview.startsWith("<")){
+        addAppBanner({
+          key: `static-${label}-html`,
+          message: `静的ファイル ${label} が HTML を返しています: ${url} 先頭文字 ${preview}`
+        });
+      }
+    })
+    .catch(err => {
+      addAppBanner({
+        key: `static-${label}-fetch`,
+        message: `静的ファイル ${label} の取得に失敗しました: ${url} ${err?.message || String(err)}`
+      });
+    });
+}
+
+async function loadDecksFromJson(){
+  const url = "./data/decks.json";
+  try{
+    const res = await fetch(url, {cache: "no-store"});
+    const text = await res.text().catch(() => "");
+    const preview = previewText(text);
+    if(!res.ok){
+      addAppBanner({
+        key: "decks-json-status",
+        message: buildDeckFetchErrorMessage(url, res.status, preview)
+      });
+      return [];
+    }
+    if(preview.startsWith("<")){
+      addAppBanner({
+        key: "decks-json-html",
+        message: `デッキ定義がHTMLで返されています: ${url} / 先頭文字 ${preview}`
+      });
+      return [];
+    }
+    const parsed = safeJsonParse(text, null);
+    if(!parsed){
+      addAppBanner({
+        key: "decks-json-parse",
+        message: `デッキ定義の解析に失敗しました: ${url} / 先頭文字 ${preview}`
+      });
+      return [];
+    }
+    return parsed;
+  }catch(e){
+    addAppBanner({
+      key: "decks-json-fetch",
+      message: buildDeckFetchErrorMessage(url, "?", previewText(e?.message || e))
+    });
+    return [];
+  }
+}
+
+function loadCoreModules(){
+  const sessionPromise = import("./sessionStore.js")
+    .then(mod => {
+      loadSession = mod.loadSession;
+      saveSession = mod.saveSession;
+      clearSession = mod.clearSession;
+      hasSession = mod.hasSession;
+    })
+    .catch(err => {
+      addAppBanner({
+        key: "sessionstore-load",
+        message: `sessionStore.js の読み込みに失敗しました: ${err?.message || String(err)}`
+      });
+    });
+
+  const dataStorePromise = import("./dataStore.js")
+    .then(mod => {
+      if(typeof mod.createCloudStore !== "function"){
+        throw new Error("createCloudStore が見つかりません。");
+      }
+      dataStore = mod.createCloudStore();
+    })
+    .catch(err => {
+      addAppBanner({
+        key: "datastore-load",
+        message: `dataStore.js の読み込みに失敗しました: ${err?.message || String(err)}`
+      });
+      dataStore = createUnavailableDataStore("dataStore.js の読み込みに失敗しました。");
+    });
+
+  return Promise.all([sessionPromise, dataStorePromise]);
+}
+
 function renderDeckSelect(){
   const sel = document.getElementById("deckSelect");
   if(!sel) return;
@@ -2259,7 +2436,38 @@ function renderDeckSelect(){
 }
 
 async function initDecks(){
-  const decks = await dataStore.getDecks();
+  let decks = [];
+  let usedDefault = false;
+  if(dataStore && typeof dataStore.getDecks === "function"){
+    try{
+      decks = await dataStore.getDecks();
+    }catch(e){
+      addAppBanner({
+        key: "decks-api-error",
+        message: `デッキ定義の読み込みに失敗しました: /api/decks ${e?.message || String(e)}`
+      });
+    }
+  }else{
+    addAppBanner({
+      key: "decks-api-missing",
+      message: "デッキ定義の読み込みに失敗しました: dataStore が初期化されていません。"
+    });
+  }
+  if(!Array.isArray(decks) || decks.length === 0){
+    const jsonDecks = await loadDecksFromJson();
+    if(Array.isArray(jsonDecks) && jsonDecks.length){
+      decks = jsonDecks;
+    }else{
+      decks = getDefaultDecks();
+      usedDefault = true;
+    }
+    if(usedDefault){
+      addAppBanner({
+        key: "decks-default",
+        message: "デッキ定義のフォールバックとして既定デッキを使用しています。"
+      });
+    }
+  }
   DECKS = ensureDeckDefaults(decks);
   const defaultDeck = DECKS.find(d => d.id === DEFAULT_DECK_ID) || DECKS[0];
   setActiveDeck(defaultDeck?.id || DEFAULT_DECK_ID);
@@ -2364,6 +2572,11 @@ async function initAuthenticatedApp(){
 async function initApp(){
   registerSW();
   clearLegacyAppConfig();
+  await Promise.all([
+    checkStaticAsset("./dataStore.js", "dataStore.js"),
+    checkStaticAsset("./data/decks.json", "decks.json")
+  ]);
+  await loadCoreModules();
   if(!hasSession()){
     renderLogin();
     return;
@@ -2377,6 +2590,10 @@ async function initApp(){
     await initAuthenticatedApp();
   }catch(e){
     console.error(e);
+    addAppBanner({
+      key: "init-error",
+      message: `起動初期化に失敗しました: ${e?.message || String(e)}`
+    });
     renderLogin({message: "APIトークンまたは接続に問題があります。設定を確認してください。"});
   }
 }
